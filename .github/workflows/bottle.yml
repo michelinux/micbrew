@@ -1,0 +1,86 @@
+name: Build an Intel Homebrew bottle
+
+on:
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: Canonical homebrew/core formula name
+        type: string
+        required: true
+        default: llvm
+
+permissions:
+  contents: read
+
+jobs:
+  bottle:
+    runs-on: macos-15-intel
+    timeout-minutes: 350
+    env:
+      FORMULA: ${{ inputs.formula }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+
+    steps:
+      - name: Prepare Homebrew
+        shell: bash
+        run: |
+          if [[ ! "$FORMULA" =~ ^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$ ]]; then
+            echo "Enter a homebrew/core formula name such as llvm or llvm@22." >&2
+            exit 1
+          fi
+          [[ "$(uname -m)" == x86_64 && "$(sw_vers -productVersion)" == 15.* ]]
+          [[ "$(brew --prefix)" == /usr/local ]]
+
+          brew update
+          core="$(brew --repository homebrew/core)"
+          if [[ ! -d "$core/.git" ]]; then
+            git clone --depth 1 https://github.com/Homebrew/homebrew-core.git "$core"
+          fi
+          echo 'HOMEBREW_NO_INSTALL_FROM_API=1' >> "$GITHUB_ENV"
+          df -h "$RUNNER_TEMP"
+
+      - name: Build and package the formula
+        shell: bash
+        run: |
+          target="homebrew/core/$FORMULA"
+          brew info --json=v2 "$target" |
+            jq -e --arg name "$FORMULA" '.formulae[0].name == $name'
+
+          if [[ -n "$(brew list --versions "$target")" ]]; then
+            brew uninstall --force --ignore-dependencies "$target"
+          fi
+          brew install --build-bottle "$target"
+
+          mkdir "$RUNNER_TEMP/bottles"
+          cd "$RUNNER_TEMP/bottles"
+          brew bottle --json --no-rebuild "$target"
+          shasum -a 256 ./*.sequoia.bottle.tar.gz > SHA256SUMS
+
+      - name: Verify the bottle installs through Homebrew
+        shell: bash
+        working-directory: ${{ runner.temp }}/bottles
+        run: |
+          shasum -a 256 -c SHA256SUMS
+          brew uninstall --force --ignore-dependencies "homebrew/core/$FORMULA"
+          brew install ./*.sequoia.bottle.tar.gz
+          prefix="$(brew --prefix "$FORMULA")"
+          jq -e '.poured_from_bottle and .source.tap == "homebrew/core"' \
+            "$prefix/INSTALL_RECEIPT.json"
+          brew linkage --test "$FORMULA"
+
+          if [[ "$FORMULA" == llvm || "$FORMULA" == llvm@* ]]; then
+            printf 'int main(void) { return 0; }\n' |
+              "$prefix/bin/clang" -x c - -o "$RUNNER_TEMP/llvm-smoke-test"
+            "$RUNNER_TEMP/llvm-smoke-test"
+          fi
+
+      - name: Upload the verified bottle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.formula }}-sequoia-intel-bottle
+          path: ${{ runner.temp }}/bottles/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
