@@ -84,6 +84,8 @@ jobs:
           if [[ -n "$(brew list --versions "$target")" ]]; then
             brew uninstall --force --ignore-dependencies "$target"
           fi
+          # Install dependencies first so Homebrew can build any missing Intel bottles from source.
+          brew install --only-dependencies --build-from-source "$target"
           brew install --build-bottle "$target"
 
           mkdir "$RUNNER_TEMP/bottles"
