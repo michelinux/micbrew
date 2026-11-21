@@ -1,6 +1,8 @@
 name: Build an Intel Homebrew bottle
 
 on:
+  schedule:
+    - cron: '23 5 * * *'
   workflow_dispatch:
     inputs:
       formula:
@@ -11,13 +13,18 @@ on:
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: sequoia-intel-bottle-${{ inputs.formula || 'llvm' }}
+  cancel-in-progress: false
 
 jobs:
   bottle:
     runs-on: macos-15-intel
     timeout-minutes: 350
     env:
-      FORMULA: ${{ inputs.formula }}
+      FORMULA: ${{ inputs.formula || 'llvm' }}
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       HOMEBREW_NO_ANALYTICS: "1"
@@ -41,13 +48,39 @@ jobs:
           echo 'HOMEBREW_NO_INSTALL_FROM_API=1' >> "$GITHUB_ENV"
           df -h "$RUNNER_TEMP"
 
+      - name: Identify the source and check for an existing bottle
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source="$(brew info --json=v2 "homebrew/core/$FORMULA" |
+            jq -ce --arg name "$FORMULA" '
+              .formulae[0]
+              | select(.name == $name and .versions.stable != null)
+              | {version: .versions.stable, revision, version_scheme, source: .urls.stable}
+            ')"
+          version="$(jq -r '.version + (if .revision > 0 then "_\(.revision)" else "" end)' <<< "$source")"
+          digest="$(printf '%s' "$source" | shasum -a 256 | cut -c1-12)"
+          artifact="$FORMULA-$version-$digest-sequoia-intel-bottle"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            available="$(gh api --method GET --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$artifact" |
+              jq -r 'any(.[].artifacts[]; .expired == false)')"
+            if [[ "$available" == true ]]; then
+              echo "A bottle for $FORMULA $version is already available."
+              exit 0
+            fi
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
       - name: Build and package the formula
+        if: steps.source.outputs.build == 'true'
         shell: bash
         run: |
           target="homebrew/core/$FORMULA"
-          brew info --json=v2 "$target" |
-            jq -e --arg name "$FORMULA" '.formulae[0].name == $name'
-
           if [[ -n "$(brew list --versions "$target")" ]]; then
             brew uninstall --force --ignore-dependencies "$target"
           fi
@@ -59,6 +92,7 @@ jobs:
           shasum -a 256 ./*.sequoia.bottle.tar.gz > SHA256SUMS
 
       - name: Verify the bottle installs through Homebrew
+        if: steps.source.outputs.build == 'true'
         shell: bash
         working-directory: ${{ runner.temp }}/bottles
         run: |
@@ -77,10 +111,12 @@ jobs:
           fi
 
       - name: Upload the verified bottle
+        if: steps.source.outputs.build == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.formula }}-sequoia-intel-bottle
+          name: ${{ steps.source.outputs.artifact }}
           path: ${{ runner.temp }}/bottles/
           if-no-files-found: error
           compression-level: 0
           retention-days: 90
+          overwrite: true
