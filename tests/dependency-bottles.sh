@@ -167,3 +167,10 @@ mv "$test_dir/go-dependency.json" "$test_dir/go.json"
 diff -u - "$test_dir/calls" <<'EXPECTED'
 install --force-bottle --as-dependency ./go--2.0.sequoia.bottle.tar.gz
 EXPECTED
+
+: > "$test_dir/calls"
+if MICBREW_BOTTLE_ONLY=parent "$root/bin/brew" install parent; then
+  echo 'The one-off bottle-only install succeeded without a bottle' >&2
+  exit 1
+fi
+[[ ! -s "$test_dir/calls" ]]

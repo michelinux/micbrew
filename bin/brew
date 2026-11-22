@@ -26,7 +26,9 @@ if [[ $# -eq 0 && "$mode" =~ ^(install|reinstall)$ || $# -gt 0 && "$mode" == upd
 fi
 project_dir="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 bottle_required() {
-  grep -Fxq -- "${1#homebrew/core/}" "$project_dir/bottle-only.txt"
+  local name=${1#homebrew/core/}
+  [[ -n "$name" && "${MICBREW_BOTTLE_ONLY:-}" == "$name" ]] ||
+    grep -Fxq -- "$name" "$project_dir/bottle-only.txt"
 }
 
 if ! command -v jq >/dev/null; then
@@ -36,7 +38,7 @@ if ! command -v jq >/dev/null; then
       exit 1
     fi
   done
-  if [[ "$mode" == upgrade && $# -eq 0 && -s "$project_dir/bottle-only.txt" ]]; then
+  if [[ "$mode" == upgrade && $# -eq 0 && ( -s "$project_dir/bottle-only.txt" || -n "${MICBREW_BOTTLE_ONLY:-}" ) ]]; then
     printf 'micbrew: jq is required to honor the bottle-only list during upgrades.\n' >&2
     exit 1
   fi
