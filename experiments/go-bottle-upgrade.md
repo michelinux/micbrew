@@ -27,9 +27,11 @@ binary printed `go version go1.27.4 darwin/amd64`.
 [Verified bottle](https://github.com/michelinux/micbrew/actions/runs/45028316368/artifacts/14757340801)
 
 In the project checkout, activate the wrapper for the current shell and check
-that it comes first. The initial local dry run stopped because Homebrew requires
-write access to `/usr/local/libexec`, which is owned by root on this Mac. Run
-the upgrade after the local preflight passes.
+that it comes first. The initial dry run stopped at Homebrew's write-access
+check for `/usr/local/libexec`. A user-specific ACL granted permission to add
+files and subdirectories there. Homebrew then accepted the local bottle with
+`--force-bottle` and planned only `go 1.27.1 -> 1.27.4`, with zero dependency
+changes. The dry run left Go at 1.27.1. Run the upgrade to complete the test.
 
 ```sh
 export PATH="$PWD/bin:$PATH"
