@@ -1,0 +1,140 @@
+#!/bin/bash
+set -euo pipefail
+
+brew_path=${MICBREW_REAL_BREW:-/usr/local/bin/brew}
+repository=michelinux/micbrew
+mode=${1:-}
+case "$mode" in
+  install|reinstall|update|upgrade) ;;
+  *) exec "$brew_path" "$@" ;;
+esac
+
+if [[ "$(uname -m)" != x86_64 || "$(sw_vers -productVersion)" != 15.* ]]; then
+  exec "$brew_path" "$@"
+fi
+
+shift
+# Leave explicit options and paths to Homebrew, including --dry-run and --build-from-source.
+for arg in "$@"; do
+  case "$arg" in
+    homebrew/core/*) ;;
+    -*|*/*|*.rb) exec "$brew_path" "$mode" "$@" ;;
+  esac
+done
+if [[ $# -eq 0 && "$mode" =~ ^(install|reinstall)$ || $# -gt 0 && "$mode" == update ]]; then
+  exec "$brew_path" "$mode" "$@"
+fi
+if ! command -v jq >/dev/null; then
+  exec "$brew_path" "$mode" "$@"
+fi
+# shellcheck source=lib/bottle.sh
+source "$(cd -- "$(dirname -- "$0")/.." && pwd)/lib/bottle.sh"
+
+if [[ "$mode" == update ]]; then
+  "$brew_path" update
+elif [[ -z "${HOMEBREW_NO_AUTO_UPDATE:-}" ]]; then
+  "$brew_path" update --auto-update
+fi
+export HOMEBREW_NO_AUTO_UPDATE=1
+
+catalog='[]'
+if command -v gh >/dev/null; then
+  if ! catalog="$(gh api --method GET --paginate --slurp \
+    "repos/$repository/actions/artifacts" -f per_page=100 |
+    jq -c '[.[].artifacts[] | select(.expired == false and (.name | endswith("-sequoia-intel-bottle")))]')"; then
+    printf 'micbrew: GitHub bottles are unavailable. Using Homebrew.\n' >&2
+    catalog='[]'
+  fi
+fi
+
+work_dir=
+trap 'if [[ -n "$work_dir" ]]; then rm -rf -- "$work_dir"; fi' EXIT
+unmanaged=()
+
+process_formula() {
+  local arg=$1 name=${1#homebrew/core/} metadata identity version artifact run_id file digest destination
+  local bulk=${2:-}
+  if [[ ! "$name" =~ ^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$ ]] ||
+    ! metadata="$("$brew_path" info --formula --json=v2 "$arg" 2>/dev/null)" ||
+    ! jq -e --arg name "$name" '.formulae[0] | .name == $name and .tap == "homebrew/core" and .versions.stable != null' \
+      <<< "$metadata" >/dev/null; then
+    unmanaged+=("$arg")
+    return
+  fi
+
+  if ! jq -e --arg mode "$mode" '
+    .formulae[0]
+    | (.pinned | not)
+      and (if $mode == "install" then
+        (.installed | length == 0) or (.outdated and (env.HOMEBREW_NO_INSTALL_UPGRADE // "") == "")
+      elif $mode == "reinstall" then (.installed | length > 0)
+      else .outdated and (.installed | length > 0)
+      end)
+  ' <<< "$metadata" >/dev/null; then
+    unmanaged+=("$arg")
+    return
+  fi
+
+  identity="$(bottle_identity "$name" "$metadata")"
+  IFS=$'\t' read -r version artifact <<< "$identity"
+  run_id="$(jq -r --arg name "$artifact" '
+    map(select(.name == $name and .workflow_run.head_repository_id == .workflow_run.repository_id)
+        | select(.workflow_run.id != null))
+    | max_by(.created_at) | .workflow_run.id // empty
+  ' <<< "$catalog")"
+
+  if [[ "$mode" == update ]]; then
+    if [[ -n "$run_id" ]]; then
+      printf 'micbrew: %s %s has a matching Intel bottle.\n' "$name" "$version"
+    fi
+    return
+  fi
+
+  if [[ -n "$run_id" ]]; then
+    if [[ -z "$work_dir" ]]; then
+      work_dir="$(mktemp -d "${TMPDIR:-/tmp}/micbrew.XXXXXX")"
+    fi
+    destination="$work_dir/$name"
+    if gh run download "$run_id" --repo "$repository" --name "$artifact" --dir "$destination"; then
+      file="$name--$version.sequoia.bottle.tar.gz"
+      digest="$(awk -v file="./$file" '$2 == file {print $1}' "$destination/SHA256SUMS")"
+      if [[ ! "$digest" =~ ^[a-f0-9]{64}$ ]] ||
+        ! printf '%s  %s\n' "$digest" "$destination/$file" | shasum -a 256 -c; then
+        printf 'micbrew: checksum verification failed for %s.\n' "$file" >&2
+        return 1
+      fi
+      (cd "$destination" && HOMEBREW_DEVELOPER=1 "$brew_path" "$mode" "./$file")
+      return
+    fi
+    printf 'micbrew: download failed for %s. Using Homebrew.\n' "$artifact" >&2
+  fi
+
+  if [[ -z "$bulk" ]] && ! jq -e '
+    .formulae[0].bottle.stable.files // {}
+    | keys | any(test("^(all|sequoia|sonoma|ventura|monterey|big_sur|catalina|mojave|high_sierra|sierra|el_capitan|yosemite)$"))
+  ' <<< "$metadata" >/dev/null; then
+    "$brew_path" "$mode" --build-from-source "$arg"
+  else
+    unmanaged+=("$arg")
+  fi
+}
+
+if [[ $# -eq 0 ]]; then
+  # With no arguments, look for bottles before Homebrew upgrades everything else.
+  outdated="$("$brew_path" outdated --formula --json=v2 | jq -r '.formulae[] | select(.pinned | not) | .name')"
+  while IFS= read -r name; do
+    if [[ -n "$name" ]] && jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null; then
+      process_formula "$name" bulk
+    fi
+  done <<< "$outdated"
+  if [[ "$mode" == upgrade ]]; then
+    "$brew_path" upgrade
+  fi
+else
+  for arg in "$@"; do
+    process_formula "$arg"
+  done
+  if [[ ${#unmanaged[@]} -gt 0 ]]; then
+    "$brew_path" "$mode" "${unmanaged[@]}"
+  fi
+fi

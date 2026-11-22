@@ -30,6 +30,10 @@ jobs:
       HOMEBREW_NO_ANALYTICS: "1"
 
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
       - name: Prepare Homebrew
         shell: bash
         run: |
@@ -54,15 +58,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          source="$(brew info --json=v2 "homebrew/core/$FORMULA" |
-            jq -ce --arg name "$FORMULA" '
-              .formulae[0]
-              | select(.name == $name and .versions.stable != null)
-              | {version: .versions.stable, revision, version_scheme, source: .urls.stable}
-            ')"
-          version="$(jq -r '.version + (if .revision > 0 then "_\(.revision)" else "" end)' <<< "$source")"
-          digest="$(printf '%s' "$source" | shasum -a 256 | cut -c1-12)"
-          artifact="$FORMULA-$version-$digest-sequoia-intel-bottle"
+          source lib/bottle.sh
+          metadata="$(brew info --json=v2 "homebrew/core/$FORMULA")"
+          identity="$(bottle_identity "$FORMULA" "$metadata")"
+          IFS=$'\t' read -r version artifact <<< "$identity"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
 
           if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
@@ -114,7 +113,7 @@ jobs:
         run: |
           shasum -a 256 -c SHA256SUMS
           brew uninstall --force --ignore-dependencies "homebrew/core/$FORMULA"
-          brew install ./*.sequoia.bottle.tar.gz
+          HOMEBREW_DEVELOPER=1 brew install ./*.sequoia.bottle.tar.gz
           prefix="$(brew --prefix "$FORMULA")"
           jq -e '.poured_from_bottle and .source.tap == "homebrew/core"' \
             "$prefix/INSTALL_RECEIPT.json"
