@@ -54,7 +54,7 @@ jobs:
       group: sequoia-intel-bottle-${{ matrix.formula }}
       cancel-in-progress: false
     runs-on: macos-15-intel
-    timeout-minutes: 350
+    timeout-minutes: 360
     env:
       FORMULA: ${{ matrix.formula }}
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -111,8 +111,22 @@ jobs:
           if [[ -n "$(brew list --versions "$target")" ]]; then
             brew uninstall --force --ignore-dependencies "$target"
           fi
-          # Install dependencies first so Homebrew can build any missing Intel bottles from source.
+          # Install dependencies first so missing Intel bottles can be replaced by source builds.
           brew install --only-dependencies --build-from-source "$target"
+
+          if [[ "$FORMULA" == llvm ]]; then
+            # Use the formula's normal source-build settings for Intel bottles.
+            ruby -e '
+              path = ARGV.fetch(0)
+              recipe = File.read(path)
+              gate = "pgo_build = build.stable? && build.bottle? && OS.mac? && !versioned_formula?"
+              abort "Review the upstream LLVM profiling build before bottling" unless recipe.sub!(
+                /^    #{Regexp.escape(gate)}$/, "    #{gate} && Hardware::CPU.arm?"
+              )
+              File.write(path, recipe)
+            ' "$(brew --repository homebrew/core)/Formula/l/llvm.rb"
+          fi
+
           brew install --build-bottle "$target"
 
           mkdir "$RUNNER_TEMP/bottles"

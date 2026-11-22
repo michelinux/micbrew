@@ -22,6 +22,9 @@ Enter a canonical core formula name such as `openssl@4` for a one-off build.
 Leave the field empty to run the configured list.
 
 The workflow builds the stable formula from the core checkout on the runner.
+For LLVM it uses Homebrew's ordinary source-build settings, which omit
+profile-guided and link-time optimization so the build can fit within GitHub's
+six-hour job limit. [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits)
 It then pours the bottle back into Homebrew, checks dynamic linking, and for
 LLVM compiles and runs a small C program before uploading the bottle.
 
