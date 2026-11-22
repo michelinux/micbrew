@@ -6,25 +6,57 @@ on:
   workflow_dispatch:
     inputs:
       formula:
-        description: Canonical homebrew/core formula name
+        description: Canonical homebrew/core formula name (empty builds the configured list)
         type: string
-        required: true
-        default: llvm
+        required: false
 
 permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: sequoia-intel-bottle-${{ inputs.formula || 'llvm' }}
-  cancel-in-progress: false
-
 jobs:
+  select-formulae:
+    runs-on: ubuntu-latest
+    outputs:
+      formulae: ${{ steps.select.outputs.formulae }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Select formulae
+        id: select
+        shell: bash
+        env:
+          REQUESTED_FORMULA: ${{ inputs.formula }}
+        run: |
+          if [[ -n "$REQUESTED_FORMULA" ]]; then
+            formulae="$(jq -nc --arg name "$REQUESTED_FORMULA" '[$name]')"
+          else
+            formulae="$(cat formulae.json)"
+          fi
+          formulae="$(jq -ce '
+            if type == "array" and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$"))
+            then unique
+            else error("Enter canonical homebrew/core names in a JSON array")
+            end
+          ' <<< "$formulae")"
+          echo "formulae=$formulae" >> "$GITHUB_OUTPUT"
+
   bottle:
+    needs: select-formulae
+    if: needs.select-formulae.outputs.formulae != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(needs.select-formulae.outputs.formulae) }}
+    concurrency:
+      group: sequoia-intel-bottle-${{ matrix.formula }}
+      cancel-in-progress: false
     runs-on: macos-15-intel
     timeout-minutes: 360
     env:
-      FORMULA: ${{ inputs.formula || 'llvm' }}
+      FORMULA: ${{ matrix.formula }}
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       HOMEBREW_NO_ANALYTICS: "1"
@@ -37,10 +69,6 @@ jobs:
       - name: Prepare Homebrew
         shell: bash
         run: |
-          if [[ ! "$FORMULA" =~ ^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$ ]]; then
-            echo "Enter a homebrew/core formula name such as llvm or llvm@22." >&2
-            exit 1
-          fi
           [[ "$(uname -m)" == x86_64 && "$(sw_vers -productVersion)" == 15.* ]]
           [[ "$(brew --prefix)" == /usr/local ]]
 

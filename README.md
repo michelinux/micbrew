@@ -5,19 +5,21 @@ Homebrew bottles on Intel macOS 15 Sequoia with Homebrew in `/usr/local`.
 GitHub's standard `macos-15-intel` runner is free for public repositories.
 [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 
-## Automatic LLVM builds
+## Scheduled builds
 
 On the default branch of a GitHub repository with Actions enabled, the workflow
-checks the latest stable LLVM formula daily at 05:23 UTC. It builds when there
-is no live bottle artifact for the current stable source and formula revision.
+checks the stable formulae listed in [formulae.json](formulae.json) daily at
+05:23 UTC. The list starts with `llvm`. Add or remove canonical `homebrew/core`
+names to control which packages GitHub builds. A formula builds when there is
+no live bottle artifact for the current stable source and formula revision.
 Failed builds retry at the next check, and expired artifacts can be rebuilt.
 GitHub can disable scheduled workflows in public repositories after 60 days
 without repository activity.
 [GitHub schedule documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 
 To build immediately, open **Actions → Build an Intel Homebrew bottle → Run workflow**.
-Leave the formula set to `llvm`, or enter another canonical core formula name such as
-`llvm@22`.
+Enter a canonical core formula name such as `openssl@4` for a one-off build.
+Leave the field empty to run the configured list.
 
 The workflow builds the stable formula from the core checkout on the runner.
 For LLVM it uses Homebrew's ordinary source-build settings, which omit
