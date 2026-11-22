@@ -88,6 +88,13 @@ artifact_run() {
   ' <<< "$catalog"
 }
 
+upstream_bottle_available() {
+  jq -e '
+    .formulae[0].bottle.stable.files // {}
+    | keys | any(test("^(all|sequoia|sonoma|ventura|monterey|big_sur|catalina|mojave|high_sierra|sierra|el_capitan|yosemite)$"))
+  ' <<< "$1" >/dev/null
+}
+
 download_bottle() {
   local name=$1 version=$2 artifact=$3 run_id=$4 destination file digest
   [[ -n "$run_id" ]] || return 0
@@ -161,10 +168,11 @@ prepare_dependencies() {
 
 install_dependency_bottle() {
   local arg=$1 planned_version=$2 ancestors=$3 strict=$4 name=${1#homebrew/core/}
-  local metadata identity version artifact run_id bottle_path directory archive
+  local metadata identity version artifact run_id bottle_path directory= reference="$arg"
   [[ " $ancestors " != *" $name "* ]] || return 0
-  # Skip metadata lookups for dependencies with no candidate artifact.
-  jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null || return 0
+  if [[ "$strict" != true ]]; then
+    jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null || return 0
+  fi
   metadata="$(formula_metadata "$arg")" || return 0
   identity="$(bottle_identity "$name" "$metadata")"
   IFS=$'\t' read -r version artifact <<< "$identity"
@@ -175,18 +183,22 @@ install_dependency_bottle() {
 
   run_id="$(artifact_run "$artifact")"
   bottle_path="$(download_bottle "$name" "$version" "$artifact" "$run_id")"
-  [[ -n "$bottle_path" ]] || return 0
-
-  directory="${bottle_path%/*}"
-  archive="./${bottle_path##*/}"
+  if [[ -n "$bottle_path" ]]; then
+    directory="${bottle_path%/*}"
+    reference="./${bottle_path##*/}"
+  elif [[ "$strict" != true ]] || ! upstream_bottle_available "$metadata"; then
+    return 0
+  fi
   # A bottle can need another bottle even when the parent plan lists installs before upgrades.
   local options=(--as-dependency)
   if [[ "$strict" == true ]]; then
     options+=(--force-bottle)
   fi
-  prepare_dependencies install "$directory" "$ancestors $name" "$strict" "${options[@]}" "$archive"
-  printf 'micbrew: using a GitHub bottle for dependency %s %s.\n' "$name" "$version"
-  run_brew "$directory" install "${options[@]}" "$archive"
+  prepare_dependencies install "$directory" "$ancestors $name" "$strict" "${options[@]}" "$reference"
+  if [[ -n "$bottle_path" ]]; then
+    printf 'micbrew: using a GitHub bottle for dependency %s %s.\n' "$name" "$version"
+  fi
+  run_brew "$directory" install "${options[@]}" "$reference"
 }
 
 process_formula() {
@@ -254,10 +266,7 @@ process_formula() {
     return 1
   fi
 
-  if [[ -z "$bulk" ]] && ! jq -e '
-    .formulae[0].bottle.stable.files // {}
-    | keys | any(test("^(all|sequoia|sonoma|ventura|monterey|big_sur|catalina|mojave|high_sierra|sierra|el_capitan|yosemite)$"))
-  ' <<< "$metadata" >/dev/null; then
+  if [[ -z "$bulk" ]] && ! upstream_bottle_available "$metadata"; then
     prepare_dependencies "$mode" "" "$name" false --build-from-source "$arg"
     "$brew_path" "$mode" --build-from-source "$arg"
   else

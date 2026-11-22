@@ -9,13 +9,16 @@ source "$root/lib/bottle.sh"
 export MICBREW_TEST_DIR="$test_dir" HOMEBREW_NO_AUTO_UPDATE=1
 export MICBREW_REAL_BREW="$test_dir/brew" PATH="$test_dir:$PATH"
 
-for formula in parent runtime crypto mismatched pinned unrelated go; do
+for formula in parent runtime crypto mismatched pinned unrelated go official; do
   jq -nc --arg name "$formula" '{formulae: [{
     name: $name, tap: "homebrew/core", versions: {stable: "2.0"}, revision: 0,
     version_scheme: 0, urls: {stable: {checksum: "source"}},
     pinned: ($name == "pinned"), installed: []
   }]}' > "$test_dir/$formula.json"
 done
+jq '.formulae[0].bottle.stable.files.sonoma = {}' \
+  "$test_dir/official.json" > "$test_dir/official-bottled.json"
+mv "$test_dir/official-bottled.json" "$test_dir/official.json"
 jq '.formulae[0] |= (.installed = [{version: "1.0", installed_on_request: true}] | .outdated = true)' \
   "$test_dir/go.json" > "$test_dir/go-outdated.json"
 mv "$test_dir/go-outdated.json" "$test_dir/go.json"
@@ -92,6 +95,9 @@ PLAN
       if [[ "${MICBREW_TEST_GO_NEEDS_DEP:-}" == 1 ]]; then
         printf '==> Would install 1 dependency:\nmissing 2.0\n'
       fi
+      if [[ "${MICBREW_TEST_GO_NEEDS_OFFICIAL:-}" == 1 && ! -f "$MICBREW_TEST_DIR/official.installed" ]]; then
+        printf '==> Would install 1 dependency:\nofficial 2.0\n'
+      fi
       ;;
   esac
 else
@@ -105,6 +111,10 @@ else
     ./go--*)
       [[ "${HOMEBREW_DEVELOPER:-}" == 1 && "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" == 1 ]]
       [[ "$2" == --force-bottle && -f "$reference" ]]
+      ;;
+    official)
+      [[ "$2 $3" == '--as-dependency --force-bottle' ]]
+      touch "$MICBREW_TEST_DIR/official.installed"
       ;;
   esac
   printf '%s\n' "$*" >> "$MICBREW_TEST_DIR/calls"
@@ -140,6 +150,13 @@ fi
 [[ ! -s "$test_dir/calls" ]]
 "$root/bin/brew" upgrade go
 diff -u - "$test_dir/calls" <<'EXPECTED'
+install --force-bottle ./go--2.0.sequoia.bottle.tar.gz
+EXPECTED
+
+: > "$test_dir/calls"
+MICBREW_TEST_GO_NEEDS_OFFICIAL=1 "$root/bin/brew" upgrade go
+diff -u - "$test_dir/calls" <<'EXPECTED'
+install --as-dependency --force-bottle official
 install --force-bottle ./go--2.0.sequoia.bottle.tar.gz
 EXPECTED
 
