@@ -9,15 +9,18 @@ source "$root/lib/bottle.sh"
 export MICBREW_TEST_DIR="$test_dir" HOMEBREW_NO_AUTO_UPDATE=1
 export MICBREW_REAL_BREW="$test_dir/brew" PATH="$test_dir:$PATH"
 
-for formula in parent runtime crypto mismatched pinned unrelated; do
+for formula in parent runtime crypto mismatched pinned unrelated go; do
   jq -nc --arg name "$formula" '{formulae: [{
     name: $name, tap: "homebrew/core", versions: {stable: "2.0"}, revision: 0,
     version_scheme: 0, urls: {stable: {checksum: "source"}},
     pinned: ($name == "pinned"), installed: []
   }]}' > "$test_dir/$formula.json"
 done
+jq '.formulae[0] |= (.installed = [{version: "1.0"}] | .outdated = true)' \
+  "$test_dir/go.json" > "$test_dir/go-outdated.json"
+mv "$test_dir/go-outdated.json" "$test_dir/go.json"
 
-for formula in runtime crypto mismatched pinned unrelated; do
+for formula in runtime crypto mismatched pinned unrelated go; do
   identity="$(bottle_identity "$formula" "$(cat "$test_dir/$formula.json")")"
   IFS=$'\t' read -r version artifact <<< "$identity"
   jq -nc --arg name "$artifact" '{
@@ -37,7 +40,11 @@ cat > "$test_dir/gh" <<'MOCK'
 #!/bin/bash
 set -eu
 if [[ "$1" == api ]]; then
-  cat "$MICBREW_TEST_DIR/catalog.json"
+  if [[ "${MICBREW_TEST_OMIT_GO:-}" == 1 ]]; then
+    jq '.[].artifacts |= map(select(.name | startswith("go-") | not))' "$MICBREW_TEST_DIR/catalog.json"
+  else
+    cat "$MICBREW_TEST_DIR/catalog.json"
+  fi
 else
   artifact=$7
   destination=$9
@@ -81,6 +88,11 @@ PLAN
     ./runtime--*)
       printf '==> Would upgrade 1 dependency for runtime:\ncrypto 1.0 -> 2.0\n'
       ;;
+    ./go--*)
+      if [[ "${MICBREW_TEST_GO_NEEDS_DEP:-}" == 1 ]]; then
+        printf '==> Would install 1 dependency:\nmissing 2.0\n'
+      fi
+      ;;
   esac
 else
   reference=${@: -1}
@@ -89,6 +101,10 @@ else
       [[ "${HOMEBREW_DEVELOPER:-}" == 1 && -f "$reference" ]]
       name=${reference#./}
       touch "$MICBREW_TEST_DIR/${name%%--*}.installed"
+      ;;
+    ./go--*)
+      [[ "${HOMEBREW_DEVELOPER:-}" == 1 && "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" == 1 ]]
+      [[ "$2" == --force-bottle && -f "$reference" ]]
       ;;
   esac
   printf '%s\n' "$*" >> "$MICBREW_TEST_DIR/calls"
@@ -110,4 +126,19 @@ diff -u - "$test_dir/calls" <<'EXPECTED'
 install --as-dependency ./crypto--2.0.sequoia.bottle.tar.gz
 install --as-dependency ./runtime--2.0.sequoia.bottle.tar.gz
 upgrade
+EXPECTED
+
+: > "$test_dir/calls"
+if MICBREW_TEST_OMIT_GO=1 "$root/bin/brew" upgrade go; then
+  echo 'Go upgrade succeeded without a bottle' >&2
+  exit 1
+fi
+if MICBREW_TEST_GO_NEEDS_DEP=1 "$root/bin/brew" upgrade go; then
+  echo 'Go upgrade succeeded with an unresolved dependency' >&2
+  exit 1
+fi
+[[ ! -s "$test_dir/calls" ]]
+"$root/bin/brew" upgrade go
+diff -u - "$test_dir/calls" <<'EXPECTED'
+upgrade --force-bottle ./go--2.0.sequoia.bottle.tar.gz
 EXPECTED
