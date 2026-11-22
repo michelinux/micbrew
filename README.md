@@ -30,22 +30,43 @@ workflow requests 90 days of retention.
 
 ## Install the bottle
 
+### Automatic selection
+
+On an Intel Sequoia Mac with `jq` and an authenticated GitHub CLI, put this
+checkout's `bin` directory before Homebrew in your `PATH`. From this directory,
+run the following to try it in your current shell.
+
+```sh
+export PATH="$PWD/bin:$PATH"
+brew update
+brew install llvm
+```
+
+`brew update` refreshes Homebrew's metadata and reports matching GitHub bottles
+for outdated installed formulae. `brew install` and `brew upgrade` prefer a
+verified GitHub bottle matching the current stable source and revision.
+If there is no match, a named formula install or upgrade uses an upstream
+bottle when one is available and builds from source otherwise. A bare
+`brew upgrade` tries matching GitHub bottles before the usual Homebrew upgrade.
+Use `brew reinstall llvm` to replace a local build of the same version.
+Explicit options and local archive paths go straight to Homebrew.
+
+### Manual download
+
 From inside the extracted artifact directory, verify the SHA-256 checksum and
 install the archive.
 
 ```sh
-shasum -a 256 -c SHA256SUMS && brew install ./llvm--*.sequoia.bottle.tar.gz
+shasum -a 256 -c SHA256SUMS && HOMEBREW_DEVELOPER=1 brew install ./llvm--*.sequoia.bottle.tar.gz
 ```
 
 If the same version is already installed and you want to replace it with this
-bottle, use `brew reinstall` with the same archive path. LLVM is keg-only.
+bottle, use the same command with `reinstall`. LLVM is keg-only.
 Invoke it with `"$(brew --prefix llvm)/bin/clang"`.
 
 The archive installs under the original core formula name and version, with a
 Homebrew receipt. Homebrew still resolves dependencies normally, so a missing
-dependency can require its own source build or compatible bottle. Install newer
-LLVM bottles by archive path when the workflow produces them. Plain
-`brew install llvm` and `brew upgrade` continue to use upstream bottle metadata.
+dependency can require its own source build or compatible bottle.
 [Homebrew bottle documentation](https://docs.brew.sh/Bottles)
 
 Homebrew plans to remove Intel support in or after September 2027.
