@@ -191,7 +191,7 @@ install_dependency_bottle() {
 
 process_formula() {
   local arg=$1 name=${1#homebrew/core/} metadata identity version artifact run_id bottle_path
-  local bulk=${2:-} directory archive strict=false
+  local bulk=${2:-} directory archive strict=false bottle_command="$mode"
   set --
   if [[ "$mode" != update ]] && bottle_required "$name"; then
     strict=true
@@ -236,8 +236,16 @@ process_formula() {
   if [[ -n "$bottle_path" ]]; then
     directory="${bottle_path%/*}"
     archive="./${bottle_path##*/}"
-    prepare_dependencies "$mode" "$directory" "$name" "$strict" "$@" "$archive"
-    run_brew "$directory" "$mode" "$@" "$archive"
+    if [[ "$mode" == upgrade ]]; then
+      # Homebrew accepts local bottles through install, which can upgrade an outdated keg.
+      bottle_command=install
+      local -x HOMEBREW_NO_INSTALL_UPGRADE=
+      if ! jq -e '.formulae[0].installed | any(.installed_on_request == true)' <<< "$metadata" >/dev/null; then
+        set -- "$@" --as-dependency
+      fi
+    fi
+    prepare_dependencies "$bottle_command" "$directory" "$name" "$strict" "$@" "$archive"
+    run_brew "$directory" "$bottle_command" "$@" "$archive"
     return
   fi
 

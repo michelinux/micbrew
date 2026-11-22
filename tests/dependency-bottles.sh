@@ -16,7 +16,7 @@ for formula in parent runtime crypto mismatched pinned unrelated go; do
     pinned: ($name == "pinned"), installed: []
   }]}' > "$test_dir/$formula.json"
 done
-jq '.formulae[0] |= (.installed = [{version: "1.0"}] | .outdated = true)' \
+jq '.formulae[0] |= (.installed = [{version: "1.0", installed_on_request: true}] | .outdated = true)' \
   "$test_dir/go.json" > "$test_dir/go-outdated.json"
 mv "$test_dir/go-outdated.json" "$test_dir/go.json"
 
@@ -140,5 +140,13 @@ fi
 [[ ! -s "$test_dir/calls" ]]
 "$root/bin/brew" upgrade go
 diff -u - "$test_dir/calls" <<'EXPECTED'
-upgrade --force-bottle ./go--2.0.sequoia.bottle.tar.gz
+install --force-bottle ./go--2.0.sequoia.bottle.tar.gz
+EXPECTED
+
+jq '.formulae[0].installed[0].installed_on_request = false' "$test_dir/go.json" > "$test_dir/go-dependency.json"
+mv "$test_dir/go-dependency.json" "$test_dir/go.json"
+: > "$test_dir/calls"
+"$root/bin/brew" upgrade go
+diff -u - "$test_dir/calls" <<'EXPECTED'
+install --force-bottle --as-dependency ./go--2.0.sequoia.bottle.tar.gz
 EXPECTED
