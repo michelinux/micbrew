@@ -24,11 +24,26 @@ done
 if [[ $# -eq 0 && "$mode" =~ ^(install|reinstall)$ || $# -gt 0 && "$mode" == update ]]; then
   exec "$brew_path" "$mode" "$@"
 fi
+project_dir="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+bottle_required() {
+  grep -Fxq -- "${1#homebrew/core/}" "$project_dir/bottle-only.txt"
+}
+
 if ! command -v jq >/dev/null; then
+  for arg in "$@"; do
+    if bottle_required "$arg"; then
+      printf 'micbrew: jq is required to look up the bottle for %s.\n' "$arg" >&2
+      exit 1
+    fi
+  done
+  if [[ "$mode" == upgrade && $# -eq 0 && -s "$project_dir/bottle-only.txt" ]]; then
+    printf 'micbrew: jq is required to honor the bottle-only list during upgrades.\n' >&2
+    exit 1
+  fi
   exec "$brew_path" "$mode" "$@"
 fi
 # shellcheck source=lib/bottle.sh
-source "$(cd -- "$(dirname -- "$0")/.." && pwd)/lib/bottle.sh"
+source "$project_dir/lib/bottle.sh"
 
 if [[ "$mode" == update ]]; then
   "$brew_path" update
@@ -105,15 +120,18 @@ run_brew() {
 
 prepare_dependencies() {
   [[ "$catalog" != '[]' ]] || return 0
-  local command=$1 directory=$2 ancestors=$3 plan dependencies name version
-  shift 3
+  local command=$1 directory=$2 ancestors=$3 strict=$4 plan dependencies name version
+  shift 4
   # Reinstall has no dry-run, but the install planner can show just its dependencies.
   if [[ "$command" == reinstall ]]; then
     command=install
     set -- --only-dependencies "$@"
   fi
-  # A failed preview leaves the actual installation and its errors to Homebrew.
-  if ! plan="$(HOMEBREW_NO_COLOR=1 run_brew "$directory" "$command" --dry-run --no-ask "$@" 2>/dev/null)"; then
+  if ! plan="$(HOMEBREW_NO_COLOR=1 run_brew "$directory" "$command" --dry-run --no-ask "$@" 2>&1)"; then
+    if [[ "$strict" == true ]]; then
+      printf 'micbrew: unable to verify the bottle-only dependency plan.\n%s\n' "$plan" >&2
+      return 1
+    fi
     return 0
   fi
   dependencies="$(awk '
@@ -128,12 +146,21 @@ prepare_dependencies() {
   ' <<< "$plan")"
   while read -r name version; do
     [[ -n "$name" ]] || continue
-    install_dependency_bottle "$name" "$version" "$ancestors"
+    install_dependency_bottle "$name" "$version" "$ancestors" "$strict"
   done <<< "$dependencies"
+
+  if [[ "$strict" == true ]] &&
+    grep -Eq '^==> Would (install|upgrade) [0-9]+ dependenc(y|ies)( for [^:]+)?:$' <<< "$plan"; then
+    plan="$(HOMEBREW_NO_COLOR=1 run_brew "$directory" "$command" --dry-run --no-ask "$@")"
+    if grep -Eq '^==> Would (install|upgrade) [0-9]+ dependenc(y|ies)( for [^:]+)?:$' <<< "$plan"; then
+      printf 'micbrew: the following plan still requires dependencies. Waiting for matching bottles.\n%s\n' "$plan" >&2
+      return 1
+    fi
+  fi
 }
 
 install_dependency_bottle() {
-  local arg=$1 planned_version=$2 ancestors=$3 name=${1#homebrew/core/}
+  local arg=$1 planned_version=$2 ancestors=$3 strict=$4 name=${1#homebrew/core/}
   local metadata identity version artifact run_id bottle_path directory archive
   [[ " $ancestors " != *" $name "* ]] || return 0
   # Skip metadata lookups for dependencies with no candidate artifact.
@@ -153,15 +180,30 @@ install_dependency_bottle() {
   directory="${bottle_path%/*}"
   archive="./${bottle_path##*/}"
   # A bottle can need another bottle even when the parent plan lists installs before upgrades.
-  prepare_dependencies install "$directory" "$ancestors $name" --as-dependency "$archive"
+  local options=(--as-dependency)
+  if [[ "$strict" == true ]]; then
+    options+=(--force-bottle)
+  fi
+  prepare_dependencies install "$directory" "$ancestors $name" "$strict" "${options[@]}" "$archive"
   printf 'micbrew: using a GitHub bottle for dependency %s %s.\n' "$name" "$version"
-  run_brew "$directory" install --as-dependency "$archive"
+  run_brew "$directory" install "${options[@]}" "$archive"
 }
 
 process_formula() {
   local arg=$1 name=${1#homebrew/core/} metadata identity version artifact run_id bottle_path
-  local bulk=${2:-} directory archive
+  local bulk=${2:-} directory archive strict=false
+  set --
+  if [[ "$mode" != update ]] && bottle_required "$name"; then
+    strict=true
+    set -- --force-bottle
+    # Keep the bottle-only transaction from rebuilding reverse dependencies.
+    local -x HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+  fi
   if ! metadata="$(formula_metadata "$arg")"; then
+    if [[ "$strict" == true ]]; then
+      printf 'micbrew: unable to resolve the formula for %s.\n' "$arg" >&2
+      return 1
+    fi
     unmanaged+=("$arg")
     return
   fi
@@ -194,20 +236,25 @@ process_formula() {
   if [[ -n "$bottle_path" ]]; then
     directory="${bottle_path%/*}"
     archive="./${bottle_path##*/}"
-    prepare_dependencies "$mode" "$directory" "$name" "$archive"
-    run_brew "$directory" "$mode" "$archive"
+    prepare_dependencies "$mode" "$directory" "$name" "$strict" "$@" "$archive"
+    run_brew "$directory" "$mode" "$@" "$archive"
     return
+  fi
+
+  if [[ "$strict" == true ]]; then
+    printf 'micbrew: waiting for a matching GitHub bottle for %s %s.\n' "$name" "$version" >&2
+    return 1
   fi
 
   if [[ -z "$bulk" ]] && ! jq -e '
     .formulae[0].bottle.stable.files // {}
     | keys | any(test("^(all|sequoia|sonoma|ventura|monterey|big_sur|catalina|mojave|high_sierra|sierra|el_capitan|yosemite)$"))
   ' <<< "$metadata" >/dev/null; then
-    prepare_dependencies "$mode" "" "$name" --build-from-source "$arg"
+    prepare_dependencies "$mode" "" "$name" false --build-from-source "$arg"
     "$brew_path" "$mode" --build-from-source "$arg"
   else
     if [[ -z "$bulk" ]]; then
-      prepare_dependencies "$mode" "" "$name" "$arg"
+      prepare_dependencies "$mode" "" "$name" false "$arg"
     fi
     unmanaged+=("$arg")
   fi
@@ -217,12 +264,13 @@ if [[ $# -eq 0 ]]; then
   # With no arguments, look for bottles before Homebrew upgrades everything else.
   outdated="$("$brew_path" outdated --formula --json=v2 | jq -r '.formulae[] | select(.pinned | not) | .name')"
   while IFS= read -r name; do
-    if [[ -n "$name" ]] && jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null; then
+    if [[ -n "$name" ]] && { { [[ "$mode" == upgrade ]] && bottle_required "$name"; } ||
+      jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null; }; then
       process_formula "$name" bulk
     fi
   done <<< "$outdated"
   if [[ "$mode" == upgrade ]]; then
-    prepare_dependencies upgrade "" ""
+    prepare_dependencies upgrade "" "" false
     "$brew_path" upgrade
   fi
 else

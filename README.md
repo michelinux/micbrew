@@ -56,6 +56,9 @@ bottle when one is available and builds from source otherwise. A bare
 The wrapper also checks Homebrew's plan for dependencies due to be installed or
 upgraded. It installs exact-version GitHub matches with Homebrew's
 `--as-dependency` flag and lets Homebrew resolve the remaining dependencies.
+`brew upgrade go` requires a verified GitHub bottle for Go and matching
+bottles for any pending dependencies. If a required bottle is missing, the
+wrapper stops before starting a local build.
 Use `brew reinstall llvm` to replace a local build of the same version.
 Explicit options and local archive paths go straight to Homebrew.
 
