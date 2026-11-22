@@ -49,6 +49,10 @@ jq -e '.poured_from_bottle and .source.tap == "homebrew/core"' \
   "$go_prefix/INSTALL_RECEIPT.json"
 ```
 
+The local upgrade passed. The installed binary reports
+`go version go1.27.4 darwin/amd64`, and its Homebrew receipt shows
+`poured_from_bottle: true`, tap `homebrew/core`, and zero runtime dependencies.
+
 ## Future upgrades
 
 `formulae.json` schedules Go builds for new stable versions and formula
