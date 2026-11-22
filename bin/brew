@@ -49,15 +49,119 @@ fi
 
 work_dir=
 trap 'if [[ -n "$work_dir" ]]; then rm -rf -- "$work_dir"; fi' EXIT
+if [[ "$mode" != update && "$catalog" != '[]' ]]; then
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/micbrew.XXXXXX")"
+fi
 unmanaged=()
 
-process_formula() {
-  local arg=$1 name=${1#homebrew/core/} metadata identity version artifact run_id file digest destination
-  local bulk=${2:-}
+formula_metadata() {
+  local arg=$1 name=${1#homebrew/core/} metadata
   if [[ ! "$name" =~ ^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$ ]] ||
     ! metadata="$("$brew_path" info --formula --json=v2 "$arg" 2>/dev/null)" ||
     ! jq -e --arg name "$name" '.formulae[0] | .name == $name and .tap == "homebrew/core" and .versions.stable != null' \
       <<< "$metadata" >/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$metadata"
+}
+
+artifact_run() {
+  jq -r --arg name "$1" '
+    map(select(.name == $name and .workflow_run.head_repository_id == .workflow_run.repository_id)
+        | select(.workflow_run.id != null))
+    | max_by(.created_at) | .workflow_run.id // empty
+  ' <<< "$catalog"
+}
+
+download_bottle() {
+  local name=$1 version=$2 artifact=$3 run_id=$4 destination file digest
+  [[ -n "$run_id" ]] || return 0
+
+  destination="$(mktemp -d "$work_dir/$name.XXXXXX")" || return
+  if ! gh run download "$run_id" --repo "$repository" --name "$artifact" --dir "$destination" >&2; then
+    printf 'micbrew: download failed for %s. Using Homebrew.\n' "$artifact" >&2
+    return 0
+  fi
+
+  file="$name--$version.sequoia.bottle.tar.gz"
+  if ! digest="$(awk -v file="./$file" '$2 == file {print $1}' "$destination/SHA256SUMS")" ||
+    [[ ! "$digest" =~ ^[a-f0-9]{64}$ ]] ||
+    ! printf '%s  %s\n' "$digest" "$destination/$file" | shasum -a 256 -c --status; then
+    printf 'micbrew: checksum verification failed for %s.\n' "$file" >&2
+    return 1
+  fi
+  printf '%s\n' "$destination/$file"
+}
+
+run_brew() {
+  local directory=$1
+  shift
+  if [[ -n "$directory" ]]; then
+    (cd "$directory" && HOMEBREW_DEVELOPER=1 "$brew_path" "$@")
+  else
+    "$brew_path" "$@"
+  fi
+}
+
+prepare_dependencies() {
+  [[ "$catalog" != '[]' ]] || return 0
+  local command=$1 directory=$2 ancestors=$3 plan dependencies name version
+  shift 3
+  # Reinstall has no dry-run, but the install planner can show just its dependencies.
+  if [[ "$command" == reinstall ]]; then
+    command=install
+    set -- --only-dependencies "$@"
+  fi
+  # A failed preview leaves the actual installation and its errors to Homebrew.
+  if ! plan="$(HOMEBREW_NO_COLOR=1 run_brew "$directory" "$command" --dry-run --no-ask "$@" 2>/dev/null)"; then
+    return 0
+  fi
+  dependencies="$(awk '
+    /^==>/ {
+      in_dependencies = /^==> Would (install|upgrade) [0-9]+ dependenc(y|ies)( for [^:]+)?:$/
+      next
+    }
+    in_dependencies && (NF == 2 || (NF == 4 && $3 == "->")) {
+      entry = $1 " " $NF
+      if (!seen[entry]++) print entry
+    }
+  ' <<< "$plan")"
+  while read -r name version; do
+    [[ -n "$name" ]] || continue
+    install_dependency_bottle "$name" "$version" "$ancestors"
+  done <<< "$dependencies"
+}
+
+install_dependency_bottle() {
+  local arg=$1 planned_version=$2 ancestors=$3 name=${1#homebrew/core/}
+  local metadata identity version artifact run_id bottle_path directory archive
+  [[ " $ancestors " != *" $name "* ]] || return 0
+  # Skip metadata lookups for dependencies with no candidate artifact.
+  jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null || return 0
+  metadata="$(formula_metadata "$arg")" || return 0
+  identity="$(bottle_identity "$name" "$metadata")"
+  IFS=$'\t' read -r version artifact <<< "$identity"
+  [[ "$version" == "$planned_version" ]] || return 0
+  jq -e --arg version "$version" '
+    .formulae[0] | (.pinned | not) and (.installed | all(.version != $version))
+  ' <<< "$metadata" >/dev/null || return 0
+
+  run_id="$(artifact_run "$artifact")"
+  bottle_path="$(download_bottle "$name" "$version" "$artifact" "$run_id")"
+  [[ -n "$bottle_path" ]] || return 0
+
+  directory="${bottle_path%/*}"
+  archive="./${bottle_path##*/}"
+  # A bottle can need another bottle even when the parent plan lists installs before upgrades.
+  prepare_dependencies install "$directory" "$ancestors $name" --as-dependency "$archive"
+  printf 'micbrew: using a GitHub bottle for dependency %s %s.\n' "$name" "$version"
+  run_brew "$directory" install --as-dependency "$archive"
+}
+
+process_formula() {
+  local arg=$1 name=${1#homebrew/core/} metadata identity version artifact run_id bottle_path
+  local bulk=${2:-} directory archive
+  if ! metadata="$(formula_metadata "$arg")"; then
     unmanaged+=("$arg")
     return
   fi
@@ -77,11 +181,7 @@ process_formula() {
 
   identity="$(bottle_identity "$name" "$metadata")"
   IFS=$'\t' read -r version artifact <<< "$identity"
-  run_id="$(jq -r --arg name "$artifact" '
-    map(select(.name == $name and .workflow_run.head_repository_id == .workflow_run.repository_id)
-        | select(.workflow_run.id != null))
-    | max_by(.created_at) | .workflow_run.id // empty
-  ' <<< "$catalog")"
+  run_id="$(artifact_run "$artifact")"
 
   if [[ "$mode" == update ]]; then
     if [[ -n "$run_id" ]]; then
@@ -90,31 +190,25 @@ process_formula() {
     return
   fi
 
-  if [[ -n "$run_id" ]]; then
-    if [[ -z "$work_dir" ]]; then
-      work_dir="$(mktemp -d "${TMPDIR:-/tmp}/micbrew.XXXXXX")"
-    fi
-    destination="$work_dir/$name"
-    if gh run download "$run_id" --repo "$repository" --name "$artifact" --dir "$destination"; then
-      file="$name--$version.sequoia.bottle.tar.gz"
-      digest="$(awk -v file="./$file" '$2 == file {print $1}' "$destination/SHA256SUMS")"
-      if [[ ! "$digest" =~ ^[a-f0-9]{64}$ ]] ||
-        ! printf '%s  %s\n' "$digest" "$destination/$file" | shasum -a 256 -c; then
-        printf 'micbrew: checksum verification failed for %s.\n' "$file" >&2
-        return 1
-      fi
-      (cd "$destination" && HOMEBREW_DEVELOPER=1 "$brew_path" "$mode" "./$file")
-      return
-    fi
-    printf 'micbrew: download failed for %s. Using Homebrew.\n' "$artifact" >&2
+  bottle_path="$(download_bottle "$name" "$version" "$artifact" "$run_id")"
+  if [[ -n "$bottle_path" ]]; then
+    directory="${bottle_path%/*}"
+    archive="./${bottle_path##*/}"
+    prepare_dependencies "$mode" "$directory" "$name" "$archive"
+    run_brew "$directory" "$mode" "$archive"
+    return
   fi
 
   if [[ -z "$bulk" ]] && ! jq -e '
     .formulae[0].bottle.stable.files // {}
     | keys | any(test("^(all|sequoia|sonoma|ventura|monterey|big_sur|catalina|mojave|high_sierra|sierra|el_capitan|yosemite)$"))
   ' <<< "$metadata" >/dev/null; then
+    prepare_dependencies "$mode" "" "$name" --build-from-source "$arg"
     "$brew_path" "$mode" --build-from-source "$arg"
   else
+    if [[ -z "$bulk" ]]; then
+      prepare_dependencies "$mode" "" "$name" "$arg"
+    fi
     unmanaged+=("$arg")
   fi
 }
@@ -128,6 +222,7 @@ if [[ $# -eq 0 ]]; then
     fi
   done <<< "$outdated"
   if [[ "$mode" == upgrade ]]; then
+    prepare_dependencies upgrade "" ""
     "$brew_path" upgrade
   fi
 else

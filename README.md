@@ -50,6 +50,9 @@ verified GitHub bottle matching the current stable source and revision.
 If there is no match, a named formula install or upgrade uses an upstream
 bottle when one is available and builds from source otherwise. A bare
 `brew upgrade` tries matching GitHub bottles before the usual Homebrew upgrade.
+The wrapper also checks Homebrew's plan for dependencies due to be installed or
+upgraded. It installs exact-version GitHub matches with Homebrew's
+`--as-dependency` flag and lets Homebrew resolve the remaining dependencies.
 Use `brew reinstall llvm` to replace a local build of the same version.
 Explicit options and local archive paths go straight to Homebrew.
 
