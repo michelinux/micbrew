@@ -9,7 +9,7 @@ GitHub's standard `macos-15-intel` runner is free for public repositories.
 
 On the default branch of a GitHub repository with Actions enabled, the workflow
 checks the stable formulae listed in [formulae.json](formulae.json) daily at
-05:23 UTC. The list starts with `llvm`. Add or remove canonical `homebrew/core`
+05:23 UTC. The list includes `go` and `llvm`. Add or remove canonical `homebrew/core`
 names to control which packages GitHub builds. A formula builds when there is
 no live bottle artifact for the current stable source and formula revision.
 Failed builds retry at the next check, and expired artifacts can be rebuilt.
