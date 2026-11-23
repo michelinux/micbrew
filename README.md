@@ -37,12 +37,21 @@ workflow requests 90 days of retention.
 
 ### Automatic selection
 
-On an Intel Sequoia Mac with `jq` and an authenticated GitHub CLI, put this
-checkout's `bin` directory before Homebrew in your `PATH`. From this directory,
-run the following to try it in your current shell.
+On Intel macOS Sequoia with Homebrew in `/usr/local`, run the setup command to
+install the wrapper under `~/.local/share/micbrew` and add it to your Zsh or
+Bash startup file. Setup installs `gh` and `jq` if needed. GitHub requires
+you to sign in to download Actions artifacts, so setup prompts you to sign in
+if you run it in a terminal without an active GitHub CLI login.
 
 ```sh
-export PATH="$PWD/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/michelinux/micbrew/main/setup.sh | /bin/bash
+```
+
+Open a new terminal to use the wrapper. Run the same setup command again to
+update it. If you're working from a checkout, you can activate that copy in
+your current shell with `export PATH="$PWD/bin:$PATH"` from the project directory.
+
+```sh
 brew update
 brew install llvm
 ```
