@@ -43,12 +43,21 @@ cat > "$test_dir/gh" <<'MOCK'
 #!/bin/bash
 set -eu
 if [[ "$1" == api ]]; then
+  if [[ "${MICBREW_TEST_GH_API_FAIL:-}" == 1 ]]; then
+    exit 1
+  fi
+  if [[ -n "${MICBREW_TEST_EXPECTED_REPO:-}" ]]; then
+    [[ "$6" == "repos/$MICBREW_TEST_EXPECTED_REPO/actions/artifacts" ]]
+  fi
   if [[ "${MICBREW_TEST_OMIT_GO:-}" == 1 ]]; then
     jq '.[].artifacts |= map(select(.name | startswith("go-") | not))' "$MICBREW_TEST_DIR/catalog.json"
   else
     cat "$MICBREW_TEST_DIR/catalog.json"
   fi
 else
+  if [[ -n "${MICBREW_TEST_EXPECTED_REPO:-}" ]]; then
+    [[ "$5" == "$MICBREW_TEST_EXPECTED_REPO" ]]
+  fi
   artifact=$7
   destination=$9
   name=${artifact%%-*}
@@ -76,7 +85,7 @@ elif [[ "$1" == info ]]; then
   fi
 elif [[ "${2:-}" == --dry-run ]]; then
   case "${@: -1}" in
-    parent|--no-ask)
+    parent|homebrew/core/parent|--no-ask)
       cat <<'PLAN'
 ==> Would upgrade 1 outdated package:
 unrelated 1.0 -> 2.0
@@ -174,3 +183,24 @@ if MICBREW_BOTTLE_ONLY=parent "$root/bin/brew" install parent; then
   exit 1
 fi
 [[ ! -s "$test_dir/calls" ]]
+
+rm -f -- "$test_dir/crypto.installed" "$test_dir/runtime.installed"
+runner_temp="$test_dir/runner-temp"
+mkdir -p "$runner_temp"
+: > "$test_dir/calls"
+RUNNER_TEMP="$runner_temp" MICBREW_TEST_EXPECTED_REPO="example/micbrew" \
+  install_build_dependencies "example/micbrew" parent homebrew/core/parent
+diff -u - "$test_dir/calls" <<'EXPECTED'
+install --as-dependency ./crypto--2.0.sequoia.bottle.tar.gz
+install --as-dependency ./runtime--2.0.sequoia.bottle.tar.gz
+install --only-dependencies --build-from-source homebrew/core/parent
+EXPECTED
+[[ -z "$(ls -A "$runner_temp")" ]]
+
+rm -f -- "$test_dir/crypto.installed" "$test_dir/runtime.installed"
+: > "$test_dir/calls"
+RUNNER_TEMP="$runner_temp" MICBREW_TEST_GH_API_FAIL=1 \
+  install_build_dependencies "example/micbrew" parent homebrew/core/parent
+diff -u - "$test_dir/calls" <<'EXPECTED'
+install --only-dependencies --build-from-source homebrew/core/parent
+EXPECTED

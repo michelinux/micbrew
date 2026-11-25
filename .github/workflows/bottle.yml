@@ -60,6 +60,7 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_AUTOREMOVE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
       HOMEBREW_NO_ANALYTICS: "1"
 
     steps:
@@ -107,11 +108,15 @@ jobs:
       - name: Build and package the formula
         if: steps.source.outputs.build == 'true'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          source lib/bottle.sh
           target="homebrew/core/$FORMULA"
-          # Install dependencies before uninstalling a pre-installed target so runner
-          # tools linked against it (such as Homebrew's curl and openssl@3) keep working.
-          brew install --only-dependencies --build-from-source "$target"
+          # Reuse live GitHub bottles (and upstream bottles) for dependencies before
+          # uninstalling a pre-installed target so runner tools linked against it
+          # (such as Homebrew's curl and openssl@3) keep working.
+          install_build_dependencies "$GITHUB_REPOSITORY" "$FORMULA" "$target"
 
           if [[ -n "$(brew list --versions "$target")" ]]; then
             brew fetch --build-bottle "$target"

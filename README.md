@@ -22,6 +22,10 @@ Enter a canonical core formula name such as `openssl@4` for a one-off build.
 Leave the field empty to run the configured list.
 
 The workflow builds the stable formula from the core checkout on the runner.
+Before building, it checks the repository's live GitHub bottle artifacts and
+pours any exact-version dependency bottles (along with any available upstream
+Homebrew bottles), falling back to source builds only for remaining
+dependencies that lack both.
 When a formula is already pre-installed on the runner (such as `openssl@3`), it
 installs dependencies and fetches the source before uninstalling the existing
 keg and clearing Homebrew's tool-selection cache, so runner tools linked
