@@ -142,6 +142,12 @@ jobs:
                 rm -f -- "$link"
               fi
             done
+
+            if [[ -n "$(brew list --versions gettext)" ]]; then
+              # Unlink pre-installed gettext so CPython does not link against libintl
+              # in /usr/local as an undeclared runtime dependency.
+              brew unlink gettext
+            fi
           fi
 
           brew install --build-bottle "$target"
