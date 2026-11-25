@@ -58,6 +58,7 @@ jobs:
     env:
       FORMULA: ${{ matrix.formula }}
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_AUTOREMOVE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       HOMEBREW_NO_ANALYTICS: "1"
 
@@ -108,11 +109,16 @@ jobs:
         shell: bash
         run: |
           target="homebrew/core/$FORMULA"
-          if [[ -n "$(brew list --versions "$target")" ]]; then
-            brew uninstall --force --ignore-dependencies "$target"
-          fi
-          # Install dependencies first so missing Intel bottles can be replaced by source builds.
+          # Install dependencies before uninstalling a pre-installed target so runner
+          # tools linked against it (such as Homebrew's curl and openssl@3) keep working.
           brew install --only-dependencies --build-from-source "$target"
+
+          if [[ -n "$(brew list --versions "$target")" ]]; then
+            brew fetch --build-bottle "$target"
+            cache="$(brew --cache)"
+            brew uninstall --force --ignore-dependencies "$target"
+            rm -rf "$cache/tool-selection"
+          fi
 
           if [[ "$FORMULA" == llvm ]]; then
             # Use the formula's normal source-build settings for Intel bottles.
@@ -140,7 +146,9 @@ jobs:
         working-directory: ${{ runner.temp }}/bottles
         run: |
           shasum -a 256 -c SHA256SUMS
+          cache="$(brew --cache)"
           brew uninstall --force --ignore-dependencies "homebrew/core/$FORMULA"
+          rm -rf "$cache/tool-selection"
           HOMEBREW_DEVELOPER=1 brew install ./*.sequoia.bottle.tar.gz
           prefix="$(brew --prefix "$FORMULA")"
           jq -e '.poured_from_bottle and .source.tap == "homebrew/core"' \

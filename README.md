@@ -22,6 +22,10 @@ Enter a canonical core formula name such as `openssl@4` for a one-off build.
 Leave the field empty to run the configured list.
 
 The workflow builds the stable formula from the core checkout on the runner.
+When a formula is already pre-installed on the runner (such as `openssl@3`), it
+installs dependencies and fetches the source before uninstalling the existing
+keg and clearing Homebrew's tool-selection cache, so runner tools linked
+against that formula do not break downloads.
 For LLVM it uses Homebrew's ordinary source-build settings, which omit
 profile-guided and link-time optimization so the build can fit within GitHub's
 six-hour job limit. [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits)
