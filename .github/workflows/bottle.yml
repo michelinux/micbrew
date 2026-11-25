@@ -143,7 +143,10 @@ jobs:
             python_version="${FORMULA#python@}"
             for link in /usr/local/bin/*; do
               [[ -L "$link" ]] || continue
-              if [[ "$(readlink "$link")" == "/Library/Frameworks/Python.framework/Versions/$python_version/"* ]]; then
+              raw_target="$(readlink "$link" || true)"
+              resolved_target="$(readlink -f "$link" 2>/dev/null || true)"
+              if [[ "$resolved_target" == "/Library/Frameworks/Python.framework/Versions/$python_version/"* \
+                 || "$raw_target" == *"/Library/Frameworks/Python.framework/Versions/$python_version/"* ]]; then
                 rm -f -- "$link"
               fi
             done
