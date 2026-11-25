@@ -151,11 +151,13 @@ jobs:
               fi
             done
 
-            if [[ -n "$(brew list --versions gettext)" ]]; then
-              # Unlink pre-installed gettext so CPython does not link against libintl
-              # in /usr/local as an undeclared runtime dependency.
-              brew unlink gettext
-            fi
+            for dep in gettext gdbm; do
+              if [[ -n "$(brew list --versions "$dep")" ]]; then
+                # Unlink pre-installed optional libs so CPython does not link against
+                # them in /usr/local as undeclared runtime dependencies.
+                brew unlink "$dep"
+              fi
+            done
           fi
 
           brew install --build-bottle "$target"
