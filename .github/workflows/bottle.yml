@@ -133,6 +133,17 @@ jobs:
             ' "$(brew --repository homebrew/core)/Formula/l/llvm.rb"
           fi
 
+          if [[ "$FORMULA" == python@* ]]; then
+            # Remove preinstalled Python.org framework symlinks that collide with brew link.
+            python_version="${FORMULA#python@}"
+            for link in /usr/local/bin/*; do
+              [[ -L "$link" ]] || continue
+              if [[ "$(readlink "$link")" == "/Library/Frameworks/Python.framework/Versions/$python_version/"* ]]; then
+                rm -f -- "$link"
+              fi
+            done
+          fi
+
           brew install --build-bottle "$target"
 
           mkdir "$RUNNER_TEMP/bottles"

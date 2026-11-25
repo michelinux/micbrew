@@ -29,6 +29,9 @@ against that formula do not break downloads.
 For LLVM it uses Homebrew's ordinary source-build settings, which omit
 profile-guided and link-time optimization so the build can fit within GitHub's
 six-hour job limit. [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits)
+For `python@*` formulae it removes preinstalled `Python.framework` symlinks in
+`/usr/local/bin` for that version so Homebrew can link the built and verified
+bottle cleanly.
 It then pours the bottle back into Homebrew, checks dynamic linking, and for
 LLVM compiles and runs a small C program before uploading the bottle.
 
