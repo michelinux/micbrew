@@ -76,9 +76,14 @@ def plan_waves(
     requested_formula: str = "",
     skip_existing: bool = True,
     max_waves: int = 6,
+    durations: dict[str, float] | None = None,
 ) -> dict:
     configured_set = {validate_formula_name(n) for n in configured}
+    durations = durations or {}
     skipped: list[str] = []
+
+    def wave_sort_key(name: str) -> tuple[float, str]:
+        return (-float(durations.get(name, 0) or 0), name)
 
     def has_live_bottle(name: str) -> bool:
         obj = api_by_name.get(name)
@@ -145,14 +150,14 @@ def plan_waves(
             dependents[dep].add(node)
             in_degree[node] += 1
 
-    # Kahn's algorithm grouped by wave.
+    # Kahn's algorithm grouped by wave, ordered longest historical build first.
     waves: list[list[str]] = []
     remaining = set(to_build)
     while remaining:
-        ready = sorted(n for n in remaining if in_degree[n] == 0)
+        ready = sorted((n for n in remaining if in_degree[n] == 0), key=wave_sort_key)
         if not ready:
-            # Cycle fallback: emit remaining nodes alphabetically in the next wave.
-            waves.append(sorted(remaining))
+            # Cycle fallback: emit remaining nodes longest-first in the next wave.
+            waves.append(sorted(remaining, key=wave_sort_key))
             break
         waves.append(ready)
         for n in ready:
@@ -184,6 +189,7 @@ def main() -> int:
     parser.add_argument("--requested-formula", default="")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--max-waves", type=int, default=6)
+    parser.add_argument("--durations-file", default="")
     args = parser.parse_args()
 
     with open(args.formulae_file, encoding="utf-8") as fh:
@@ -202,6 +208,13 @@ def main() -> int:
     with open(args.artifacts_file, encoding="utf-8") as fh:
         live_artifacts = set(json.load(fh))
 
+    durations: dict[str, float] = {}
+    if args.durations_file:
+        with open(args.durations_file, encoding="utf-8") as fh:
+            raw_durations = json.load(fh)
+        if isinstance(raw_durations, dict):
+            durations = {k: float(v) for k, v in raw_durations.items() if isinstance(v, (int, float))}
+
     result = plan_waves(
         configured=configured,
         api_by_name=api_by_name,
@@ -209,6 +222,7 @@ def main() -> int:
         requested_formula=args.requested_formula.strip(),
         skip_existing=args.skip_existing,
         max_waves=args.max_waves,
+        durations=durations,
     )
 
     total = sum(len(w) for w in result["waves"])
@@ -220,7 +234,11 @@ def main() -> int:
     )
     for idx, wave in enumerate(result["waves"]):
         if wave:
-            print(f"  wave-{idx} ({len(wave)}): {', '.join(wave)}", file=sys.stderr)
+            formatted = [
+                f"{n} (~{int(durations[n] // 60)}m)" if durations.get(n, 0) >= 60 else n
+                for n in wave
+            ]
+            print(f"  wave-{idx} ({len(wave)}): {', '.join(formatted)}", file=sys.stderr)
 
     print(json.dumps(result, separators=(",", ":")))
     return 0

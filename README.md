@@ -23,10 +23,11 @@ Leave the field empty to run the configured list.
 
 The workflow skips formulae that already have a live bottle artifact up front
 and topologically sorts the remaining formulae into dependency waves
-([lib/plan-waves.py](lib/plan-waves.py)), so shared dependencies (such as `z3`,
-`llvm`, and `rust`) finish and upload their bottles before downstream formulae
-start. Dispatching a single formula also pulls in any missing transitive
-dependencies tracked in [formulae.json](formulae.json) in earlier waves.
+([lib/plan-waves.py](lib/plan-waves.py)), ordering each wave longest-build-first
+using recent job durations so shared dependencies (such as `z3`, `llvm`, and
+`rust`) and slow builds start first. Dispatching a single formula also pulls in
+any missing transitive dependencies tracked in [formulae.json](formulae.json) in
+earlier waves.
 The workflow builds each stable formula from the core checkout on the runner.
 Before building, it checks the repository's live GitHub bottle artifacts and
 pours any exact-version dependency bottles (along with any available upstream

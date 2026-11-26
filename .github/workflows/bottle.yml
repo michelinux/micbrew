@@ -39,6 +39,41 @@ jobs:
         run: |
           api_file="$RUNNER_TEMP/formula.json"
           artifacts_file="$RUNNER_TEMP/artifacts.json"
+          durations_file="$RUNNER_TEMP/durations.json"
+
+          # Collect recent successful build durations so each wave dispatches slow builds first.
+          python3 - "$GITHUB_REPOSITORY" "$durations_file" <<'PY' || echo '{}' > "$durations_file"
+          import datetime as dt, json, re, subprocess, sys
+          repo, out_path = sys.argv[1], sys.argv[2]
+          job_re = re.compile(r"^(?:wave-\d+|bottle)\s*\((.+)\)$")
+          runs_raw = subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/actions/workflows/bottle.yml/runs?status=completed&per_page=30"],
+              text=True,
+          )
+          durations = {}
+          for run in json.loads(runs_raw).get("workflow_runs", [])[:20]:
+              pages = json.loads(subprocess.check_output(
+                  ["gh", "api", "--paginate", "--slurp", f"repos/{repo}/actions/runs/{run['id']}/jobs"],
+                  text=True,
+              ))
+              for page in pages:
+                  for job in page.get("jobs", []):
+                      if job.get("conclusion") != "success":
+                          continue
+                      m = job_re.match(job.get("name", ""))
+                      if not m or m.group(1) in durations:
+                          continue
+                      s, e = job.get("started_at"), job.get("completed_at")
+                      if not s or not e:
+                          continue
+                      secs = (dt.datetime.fromisoformat(e.replace("Z", "+00:00"))
+                              - dt.datetime.fromisoformat(s.replace("Z", "+00:00"))).total_seconds()
+                      # Skip fast no-op checks where a bottle was already available.
+                      if secs >= 120:
+                          durations[m.group(1)] = int(secs)
+          with open(out_path, "w", encoding="utf-8") as fh:
+              json.dump(durations, fh)
+          PY
 
           if curl -fsSL --retry 3 https://formulae.brew.sh/api/formula.json -o "$api_file" &&
             gh api --method GET --paginate --slurp \
@@ -49,6 +84,7 @@ jobs:
               --formulae-file formulae.json \
               --api-file "$api_file" \
               --artifacts-file "$artifacts_file" \
+              --durations-file "$durations_file" \
               --requested-formula="$REQUESTED_FORMULA" \
               --skip-existing \
               --max-waves 6)"

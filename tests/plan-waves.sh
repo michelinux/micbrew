@@ -98,4 +98,24 @@ out="$(python3 "$project_dir/lib/plan-waves.py" \
   --max-waves 3 2>/dev/null)"
 jq -e '.waves == [["z3"], ["llvm"], ["rust", "ripgrep"]] and .skipped == []' <<<"$out" >/dev/null
 
+# 5. Historical durations sort each wave longest-first (with alphabetical tie-breaker).
+cat >"$tmp_dir/parallel-api.json" <<'EOF'
+[
+  {"name": "alpha", "versions": {"stable": "1.0"}, "revision": 0, "version_scheme": 0, "urls": {"stable": {"url": "https://example.invalid/a.tgz"}}, "dependencies": [], "build_dependencies": []},
+  {"name": "beta",  "versions": {"stable": "1.0"}, "revision": 0, "version_scheme": 0, "urls": {"stable": {"url": "https://example.invalid/b.tgz"}}, "dependencies": [], "build_dependencies": []},
+  {"name": "gamma", "versions": {"stable": "1.0"}, "revision": 0, "version_scheme": 0, "urls": {"stable": {"url": "https://example.invalid/g.tgz"}}, "dependencies": [], "build_dependencies": []},
+  {"name": "delta", "versions": {"stable": "1.0"}, "revision": 0, "version_scheme": 0, "urls": {"stable": {"url": "https://example.invalid/d.tgz"}}, "dependencies": [], "build_dependencies": []}
+]
+EOF
+echo '["alpha", "beta", "gamma", "delta"]' >"$tmp_dir/parallel-formulae.json"
+echo '{"gamma": 7200, "beta": 900}' >"$tmp_dir/durations.json"
+out="$(python3 "$project_dir/lib/plan-waves.py" \
+  --formulae-file "$tmp_dir/parallel-formulae.json" \
+  --api-file "$tmp_dir/parallel-api.json" \
+  --artifacts-file "$tmp_dir/empty.json" \
+  --durations-file "$tmp_dir/durations.json" \
+  --skip-existing \
+  --max-waves 2 2>/dev/null)"
+jq -e '.waves == [["gamma", "beta", "alpha", "delta"], []]' <<<"$out" >/dev/null
+
 echo "plan-waves tests passed"
