@@ -52,6 +52,24 @@ After a build succeeds, download and extract the versioned bottle from the run's
 workflow requests 90 days of retention.
 [Downloading workflow artifacts](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
 
+### Monitor wave builds
+
+Run [bin/micbrew-watch](bin/micbrew-watch) to watch the latest workflow run
+grouped by wave in the current terminal pane (pass a run ID, `--interval N`, or
+`--once` as needed):
+
+```sh
+./bin/micbrew-watch
+```
+
+To open it in a separate Rex split pane beside your current pane (or in a new
+tab with `rex window new`):
+
+```sh
+rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --ratio 40 \
+  --label Waves --focus=false --keep-open -- ./bin/micbrew-watch
+```
+
 ## Install the bottle
 
 ### Automatic selection

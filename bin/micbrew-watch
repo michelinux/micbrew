@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Live ANSI wave-grouped dashboard for micbrew GitHub Actions runs."""
+
+import argparse
+import datetime as dt
+import json
+import re
+import subprocess
+import sys
+import time
+
+DEFAULT_REPO = "michelinux/micbrew"
+RESET = "\x1b[0m"
+BOLD = "\x1b[1m"
+DIM = "\x1b[2m"
+GREEN = "\x1b[32m"
+YELLOW = "\x1b[33m"
+RED = "\x1b[31m"
+CYAN = "\x1b[36m"
+
+WAVE_RE = re.compile(r"^wave-(\d+)\s*\((.+)\)$")
+
+
+def parse_ts(ts: str | None) -> dt.datetime | None:
+    if not ts or ts.startswith("0001-"):
+        return None
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def fmt_dur(start: dt.datetime | None, end: dt.datetime | None) -> str:
+    if not start:
+        return ""
+    now = end or dt.datetime.now(dt.timezone.utc)
+    secs = max(0, int((now - start).total_seconds()))
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+def gh_json(args: list[str]):
+    out = subprocess.check_output(["gh", *args], text=True, stderr=subprocess.PIPE)
+    return json.loads(out)
+
+
+def latest_run_id(repo: str) -> str:
+    runs = gh_json(["run", "list", "--repo", repo, "--limit", "1", "--json", "databaseId"])
+    if not runs:
+        raise RuntimeError(f"No workflow runs found for {repo}")
+    return str(runs[0]["databaseId"])
+
+
+def icon_and_rank(status: str, conclusion: str | None) -> tuple[str, int]:
+    if status == "in_progress":
+        return f"{YELLOW}●{RESET}", 0
+    if conclusion == "failure":
+        return f"{RED}✗{RESET}", 1
+    if status in ("queued", "waiting", "pending"):
+        return f"{DIM}○{RESET}", 2
+    if conclusion == "success":
+        return f"{GREEN}✓{RESET}", 3
+    if conclusion == "cancelled":
+        return f"{DIM}⊘{RESET}", 4
+    return f"{DIM}·{RESET}", 5
+
+
+def active_step(job: dict) -> str:
+    if job.get("status") == "in_progress":
+        for st in job.get("steps") or []:
+            if st.get("status") == "in_progress":
+                name = st.get("name", "")
+                if len(name) > 28:
+                    name = name[:27] + "…"
+                return f"{CYAN}{name}{RESET}"
+    if job.get("conclusion") == "failure":
+        for st in job.get("steps") or []:
+            if st.get("conclusion") == "failure":
+                name = st.get("name", "")
+                if len(name) > 28:
+                    name = name[:27] + "…"
+                return f"{RED}{name}{RESET}"
+    return ""
+
+
+def render(repo: str, run_id: str, interval: int) -> tuple[str, bool]:
+    run = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}"])
+    jobs_pages = subprocess.check_output(
+        ["gh", "api", "--paginate", "--slurp", f"repos/{repo}/actions/runs/{run_id}/jobs"],
+        text=True,
+        stderr=subprocess.PIPE,
+    )
+    jobs = [j for page in json.loads(jobs_pages) for j in page.get("jobs", [])]
+
+    waves: dict[str, list[dict]] = {}
+    counts = {"ok": 0, "run": 0, "queue": 0, "fail": 0}
+    for j in jobs:
+        name = j["name"]
+        if name == "select-formulae":
+            continue
+        m = WAVE_RE.match(name)
+        if m:
+            wkey = f"Wave {m.group(1)}"
+            label = m.group(2)
+        elif name.startswith("wave-"):
+            wkey = f"Wave {name.split('-')[1]}"
+            label = "(pending)"
+        else:
+            wkey = "Other"
+            label = name
+
+        st = j.get("status", "")
+        conc = j.get("conclusion") or ""
+        if st == "in_progress":
+            counts["run"] += 1
+        elif conc == "success":
+            counts["ok"] += 1
+        elif conc == "failure":
+            counts["fail"] += 1
+        elif st in ("queued", "waiting", "pending"):
+            counts["queue"] += 1
+
+        waves.setdefault(wkey, []).append({**j, "_label": label})
+
+    now_local = dt.datetime.now().strftime("%H:%M:%S")
+    run_num = run.get("run_number", "?")
+    run_status = run.get("conclusion") or run.get("status", "")
+    lines = [
+        f"{BOLD}micbrew · Run #{run_num}{RESET} {DIM}({run_id}){RESET}  [{run_status}]  {DIM}{now_local}{RESET}",
+        f"{GREEN}✓ {counts['ok']} ok{RESET}   {YELLOW}● {counts['run']} running{RESET}   {DIM}○ {counts['queue']} queued{RESET}   {RED}✗ {counts['fail']} failed{RESET}",
+        f"{DIM}{'─' * 62}{RESET}",
+    ]
+
+    for wkey in sorted(waves.keys()):
+        wjobs = waves[wkey]
+        w_ok = sum(1 for j in wjobs if j.get("conclusion") == "success")
+        lines.append(f"{BOLD}{wkey}{RESET} {DIM}({w_ok}/{len(wjobs)} done){RESET}")
+        wjobs.sort(key=lambda j: (icon_and_rank(j.get("status", ""), j.get("conclusion"))[1], j["_label"]))
+        for j in wjobs:
+            icon, _ = icon_and_rank(j.get("status", ""), j.get("conclusion"))
+            start = parse_ts(j.get("started_at")) if j.get("status") != "queued" else None
+            end = parse_ts(j.get("completed_at"))
+            dur = fmt_dur(start, end)
+            step = active_step(j)
+            lines.append(f"  {icon} {j['_label']:<18} {dur:>7}  {step}")
+        lines.append("")
+
+    done = run.get("status") == "completed"
+    if done:
+        lines.append(f"{DIM}Run completed ({run_status}).{RESET}")
+    else:
+        lines.append(f"{DIM}Refreshing every {interval}s · Ctrl+C to exit{RESET}")
+    return "\n".join(lines), done
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Live wave-grouped status table for micbrew GitHub Actions runs."
+    )
+    parser.add_argument("run_id", nargs="?", help="Workflow run ID (defaults to the latest run)")
+    parser.add_argument("--repo", default=DEFAULT_REPO, help=f"GitHub repository (default: {DEFAULT_REPO})")
+    parser.add_argument("--interval", type=int, default=15, help="Refresh interval in seconds (default: 15)")
+    parser.add_argument("--once", action="store_true", help="Print the table once and exit")
+    args = parser.parse_args()
+
+    run_id = args.run_id or latest_run_id(args.repo)
+    while True:
+        try:
+            frame, done = render(args.repo, run_id, args.interval)
+            if args.once:
+                sys.stdout.write(frame + "\n")
+                sys.stdout.flush()
+                return 0
+            sys.stdout.write("\x1b[H\x1b[J" + frame + "\n")
+            sys.stdout.flush()
+            if done:
+                return 0
+        except KeyboardInterrupt:
+            return 0
+        except Exception as exc:
+            sys.stdout.write(f"\n{RED}Refresh error: {exc}{RESET}\n")
+            sys.stdout.flush()
+            if args.once:
+                return 1
+        try:
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
