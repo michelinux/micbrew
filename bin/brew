@@ -119,7 +119,8 @@ process_formula() {
       fi
     fi
     prepare_dependencies "$bottle_command" "$directory" "$name" "$strict" "$@" "$archive"
-    run_brew "$directory" "$bottle_command" "$@" "$archive"
+    # Keep a bottle install from triggering source rebuilds of unrelated outdated dependents.
+    HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_brew "$directory" "$bottle_command" "$@" "$archive"
     return
   fi
 

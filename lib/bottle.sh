@@ -154,7 +154,8 @@ install_dependency_bottle() {
   if [[ -n "$bottle_path" ]]; then
     printf 'micbrew: using a GitHub bottle for dependency %s %s.\n' "$name" "$version"
   fi
-  run_brew "$directory" install "${options[@]}" "$reference"
+  # Avoid triggering source rebuilds of unrelated outdated dependents mid-transaction.
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_brew "$directory" install "${options[@]}" "$reference"
 }
 
 install_build_dependencies() {
