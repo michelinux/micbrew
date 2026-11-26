@@ -57,7 +57,9 @@ workflow requests 90 days of retention.
 
 Run [bin/micbrew-watch](bin/micbrew-watch) to watch the latest workflow run
 grouped by wave in the current terminal pane (pass a run ID, `--interval N`, or
-`--once` as needed):
+`--once` as needed). It uses `gh` and requires an active GitHub CLI login
+(`gh auth login`), and works for any signed-in GitHub user on this public
+repository:
 
 ```sh
 ./bin/micbrew-watch
