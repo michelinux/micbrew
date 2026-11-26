@@ -1,4 +1,5 @@
 name: Build an Intel Homebrew bottle
+run-name: Build an Intel Homebrew bottle (${{ inputs.formula || 'configured list' }})
 
 on:
   schedule:
