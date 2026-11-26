@@ -1,0 +1,155 @@
+name: Build an Intel Homebrew bottle
+description: Build, verify, and upload a Sequoia Intel Homebrew bottle for a core formula
+
+inputs:
+  formula:
+    description: Canonical homebrew/core formula name
+    required: true
+  gh-token:
+    description: GitHub token with actions:read access
+    required: true
+  skip-existing:
+    description: Skip building if a live bottle artifact already exists
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare Homebrew
+      shell: bash
+      run: |
+        [[ "$(uname -m)" == x86_64 && "$(sw_vers -productVersion)" == 15.* ]]
+        [[ "$(brew --prefix)" == /usr/local ]]
+
+        brew update
+        core="$(brew --repository homebrew/core)"
+        if [[ ! -d "$core/.git" ]]; then
+          git clone --depth 1 https://github.com/Homebrew/homebrew-core.git "$core"
+        fi
+        echo 'HOMEBREW_NO_INSTALL_FROM_API=1' >> "$GITHUB_ENV"
+        df -h "$RUNNER_TEMP"
+
+    - name: Identify the source and check for an existing bottle
+      id: source
+      shell: bash
+      env:
+        FORMULA: ${{ inputs.formula }}
+        GH_TOKEN: ${{ inputs.gh-token }}
+        SKIP_EXISTING: ${{ inputs.skip-existing }}
+      run: |
+        source lib/bottle.sh
+        metadata="$(brew info --json=v2 "homebrew/core/$FORMULA")"
+        identity="$(bottle_identity "$FORMULA" "$metadata")"
+        IFS=$'\t' read -r version artifact <<< "$identity"
+        echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+
+        if [[ "$SKIP_EXISTING" == true ]]; then
+          available="$(gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$artifact" |
+            jq -r 'any(.[].artifacts[]; .expired == false)')"
+          if [[ "$available" == true ]]; then
+            echo "A bottle for $FORMULA $version is already available."
+            exit 0
+          fi
+        fi
+        echo "build=true" >> "$GITHUB_OUTPUT"
+
+    - name: Build and package the formula
+      if: steps.source.outputs.build == 'true'
+      shell: bash
+      env:
+        FORMULA: ${{ inputs.formula }}
+        GH_TOKEN: ${{ inputs.gh-token }}
+      run: |
+        source lib/bottle.sh
+        target="homebrew/core/$FORMULA"
+        # Reuse live GitHub bottles (and upstream bottles) for dependencies before
+        # uninstalling a pre-installed target so runner tools linked against it
+        # (such as Homebrew's curl and openssl@3) keep working.
+        install_build_dependencies "$GITHUB_REPOSITORY" "$FORMULA" "$target"
+
+        if [[ -n "$(brew list --versions "$target")" ]]; then
+          brew fetch --build-bottle "$target"
+          cache="$(brew --cache)"
+          brew uninstall --force --ignore-dependencies "$target"
+          rm -rf "$cache/tool-selection"
+        fi
+
+        if [[ "$FORMULA" == llvm ]]; then
+          # Use the formula's normal source-build settings for Intel bottles.
+          ruby -e '
+            path = ARGV.fetch(0)
+            recipe = File.read(path)
+            gate = "pgo_build = build.stable? && build.bottle? && OS.mac? && !versioned_formula?"
+            abort "Review the upstream LLVM profiling build before bottling" unless recipe.sub!(
+              /^    #{Regexp.escape(gate)}$/, "    #{gate} && Hardware::CPU.arm?"
+            )
+            File.write(path, recipe)
+          ' "$(brew --repository homebrew/core)/Formula/l/llvm.rb"
+        fi
+
+        if [[ "$FORMULA" == python@* ]]; then
+          # Remove preinstalled Python.org framework symlinks that collide with brew link.
+          python_version="${FORMULA#python@}"
+          for link in /usr/local/bin/*; do
+            [[ -L "$link" ]] || continue
+            raw_target="$(readlink "$link" || true)"
+            resolved_target="$(readlink -f "$link" 2>/dev/null || true)"
+            if [[ "$resolved_target" == "/Library/Frameworks/Python.framework/Versions/$python_version/"* \
+               || "$raw_target" == *"/Library/Frameworks/Python.framework/Versions/$python_version/"* ]]; then
+              rm -f -- "$link"
+            fi
+          done
+        fi
+
+        deps="$(brew deps --include-build "$target")"
+        for dep in gettext gdbm; do
+          if [[ "$FORMULA" != "$dep" && -n "$(brew list --versions "$dep")" ]] &&
+            ! grep -Fxq -- "$dep" <<< "$deps"; then
+            # Unlink pre-installed optional libs not declared by the formula so
+            # configure does not link against them in /usr/local as undeclared dependencies.
+            brew unlink "$dep"
+          fi
+        done
+
+        brew install --build-bottle "$target"
+
+        mkdir "$RUNNER_TEMP/bottles"
+        cd "$RUNNER_TEMP/bottles"
+        brew bottle --json --no-rebuild "$target"
+        shasum -a 256 ./*.sequoia.bottle.tar.gz > SHA256SUMS
+
+    - name: Verify the bottle installs through Homebrew
+      if: steps.source.outputs.build == 'true'
+      shell: bash
+      working-directory: ${{ runner.temp }}/bottles
+      env:
+        FORMULA: ${{ inputs.formula }}
+      run: |
+        shasum -a 256 -c SHA256SUMS
+        cache="$(brew --cache)"
+        brew uninstall --force --ignore-dependencies "homebrew/core/$FORMULA"
+        rm -rf "$cache/tool-selection"
+        HOMEBREW_DEVELOPER=1 brew install ./*.sequoia.bottle.tar.gz
+        prefix="$(brew --prefix "$FORMULA")"
+        jq -e '.poured_from_bottle and .source.tap == "homebrew/core"' \
+          "$prefix/INSTALL_RECEIPT.json"
+        brew linkage --test "$FORMULA"
+
+        if [[ "$FORMULA" == llvm || "$FORMULA" == llvm@* ]]; then
+          printf 'int main(void) { return 0; }\n' |
+            "$prefix/bin/clang" -x c - -o "$RUNNER_TEMP/llvm-smoke-test"
+          "$RUNNER_TEMP/llvm-smoke-test"
+        fi
+
+    - name: Upload the verified bottle
+      if: steps.source.outputs.build == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.source.outputs.artifact }}
+        path: ${{ runner.temp }}/bottles/
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 90
+        overwrite: true

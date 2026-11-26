@@ -1,5 +1,4 @@
 name: Build an Intel Homebrew bottle
-run-name: Build an Intel Homebrew bottle (${{ inputs.formula || 'configured list' }})
 
 on:
   schedule:
@@ -7,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       formula:
-        description: Canonical homebrew/core formula name (empty builds the configured list)
+        description: Canonical homebrew/core formula name (empty builds all missing configured formulae in dependency order)
         type: string
         required: false
 
@@ -19,185 +18,226 @@ jobs:
   select-formulae:
     runs-on: ubuntu-latest
     outputs:
-      formulae: ${{ steps.select.outputs.formulae }}
+      wave_0: ${{ steps.select.outputs.wave_0 }}
+      wave_1: ${{ steps.select.outputs.wave_1 }}
+      wave_2: ${{ steps.select.outputs.wave_2 }}
+      wave_3: ${{ steps.select.outputs.wave_3 }}
+      wave_4: ${{ steps.select.outputs.wave_4 }}
+      wave_5: ${{ steps.select.outputs.wave_5 }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Select formulae
+      - name: Plan dependency-ordered waves
         id: select
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           REQUESTED_FORMULA: ${{ inputs.formula }}
         run: |
-          if [[ -n "$REQUESTED_FORMULA" ]]; then
-            formulae="$(jq -nc --arg name "$REQUESTED_FORMULA" '[$name]')"
-          else
-            formulae="$(cat formulae.json)"
-          fi
-          formulae="$(jq -ce '
-            if type == "array" and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$"))
-            then unique
-            else error("Enter canonical homebrew/core names in a JSON array")
-            end
-          ' <<< "$formulae")"
-          echo "formulae=$formulae" >> "$GITHUB_OUTPUT"
+          api_file="$RUNNER_TEMP/formula.json"
+          artifacts_file="$RUNNER_TEMP/artifacts.json"
 
-  bottle:
+          if curl -fsSL --retry 3 https://formulae.brew.sh/api/formula.json -o "$api_file" &&
+            gh api --method GET --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts" -f per_page=100 |
+              jq -c '[.[].artifacts[] | select(.expired == false and .workflow_run.head_repository_id == .workflow_run.repository_id) | .name] | unique' \
+              > "$artifacts_file"; then
+            plan="$(python3 lib/plan-waves.py \
+              --formulae-file formulae.json \
+              --api-file "$api_file" \
+              --artifacts-file "$artifacts_file" \
+              --requested-formula "$REQUESTED_FORMULA" \
+              --skip-existing \
+              --max-waves 6)"
+            for i in 0 1 2 3 4 5; do
+              wave="$(jq -c ".waves[$i]" <<< "$plan")"
+              echo "wave_$i=$wave" >> "$GITHUB_OUTPUT"
+            done
+          else
+            echo "::warning::Unable to fetch Homebrew API or artifact catalog; falling back to flat wave_0."
+            if [[ -n "$REQUESTED_FORMULA" ]]; then
+              formulae="$(jq -nc --arg name "$REQUESTED_FORMULA" '[$name]')"
+            else
+              formulae="$(cat formulae.json)"
+            fi
+            formulae="$(jq -ce '
+              if type == "array" and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9+_.-]*(@[0-9][0-9.]*)?$"))
+              then unique
+              else error("Enter canonical homebrew/core names in a JSON array")
+              end
+            ' <<< "$formulae")"
+            echo "wave_0=$formulae" >> "$GITHUB_OUTPUT"
+            for i in 1 2 3 4 5; do
+              echo "wave_$i=[]" >> "$GITHUB_OUTPUT"
+            done
+          fi
+
+  wave-0:
     needs: select-formulae
-    if: needs.select-formulae.outputs.formulae != '[]'
+    if: needs.select-formulae.outputs.wave_0 != '[]'
     strategy:
       fail-fast: false
       matrix:
-        formula: ${{ fromJSON(needs.select-formulae.outputs.formulae) }}
+        formula: ${{ fromJSON(needs.select-formulae.outputs.wave_0) }}
     concurrency:
       group: sequoia-intel-bottle-${{ matrix.formula }}
       cancel-in-progress: false
     runs-on: macos-15-intel
     timeout-minutes: 360
     env:
-      FORMULA: ${{ matrix.formula }}
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_AUTOREMOVE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
       HOMEBREW_NO_ANALYTICS: "1"
-
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-
-      - name: Prepare Homebrew
-        shell: bash
-        run: |
-          [[ "$(uname -m)" == x86_64 && "$(sw_vers -productVersion)" == 15.* ]]
-          [[ "$(brew --prefix)" == /usr/local ]]
-
-          brew update
-          core="$(brew --repository homebrew/core)"
-          if [[ ! -d "$core/.git" ]]; then
-            git clone --depth 1 https://github.com/Homebrew/homebrew-core.git "$core"
-          fi
-          echo 'HOMEBREW_NO_INSTALL_FROM_API=1' >> "$GITHUB_ENV"
-          df -h "$RUNNER_TEMP"
-
-      - name: Identify the source and check for an existing bottle
-        id: source
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          source lib/bottle.sh
-          metadata="$(brew info --json=v2 "homebrew/core/$FORMULA")"
-          identity="$(bottle_identity "$FORMULA" "$metadata")"
-          IFS=$'\t' read -r version artifact <<< "$identity"
-          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-
-          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
-            available="$(gh api --method GET --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$artifact" |
-              jq -r 'any(.[].artifacts[]; .expired == false)')"
-            if [[ "$available" == true ]]; then
-              echo "A bottle for $FORMULA $version is already available."
-              exit 0
-            fi
-          fi
-          echo "build=true" >> "$GITHUB_OUTPUT"
-
-      - name: Build and package the formula
-        if: steps.source.outputs.build == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          source lib/bottle.sh
-          target="homebrew/core/$FORMULA"
-          # Reuse live GitHub bottles (and upstream bottles) for dependencies before
-          # uninstalling a pre-installed target so runner tools linked against it
-          # (such as Homebrew's curl and openssl@3) keep working.
-          install_build_dependencies "$GITHUB_REPOSITORY" "$FORMULA" "$target"
-
-          if [[ -n "$(brew list --versions "$target")" ]]; then
-            brew fetch --build-bottle "$target"
-            cache="$(brew --cache)"
-            brew uninstall --force --ignore-dependencies "$target"
-            rm -rf "$cache/tool-selection"
-          fi
-
-          if [[ "$FORMULA" == llvm ]]; then
-            # Use the formula's normal source-build settings for Intel bottles.
-            ruby -e '
-              path = ARGV.fetch(0)
-              recipe = File.read(path)
-              gate = "pgo_build = build.stable? && build.bottle? && OS.mac? && !versioned_formula?"
-              abort "Review the upstream LLVM profiling build before bottling" unless recipe.sub!(
-                /^    #{Regexp.escape(gate)}$/, "    #{gate} && Hardware::CPU.arm?"
-              )
-              File.write(path, recipe)
-            ' "$(brew --repository homebrew/core)/Formula/l/llvm.rb"
-          fi
-
-          if [[ "$FORMULA" == python@* ]]; then
-            # Remove preinstalled Python.org framework symlinks that collide with brew link.
-            python_version="${FORMULA#python@}"
-            for link in /usr/local/bin/*; do
-              [[ -L "$link" ]] || continue
-              raw_target="$(readlink "$link" || true)"
-              resolved_target="$(readlink -f "$link" 2>/dev/null || true)"
-              if [[ "$resolved_target" == "/Library/Frameworks/Python.framework/Versions/$python_version/"* \
-                 || "$raw_target" == *"/Library/Frameworks/Python.framework/Versions/$python_version/"* ]]; then
-                rm -f -- "$link"
-              fi
-            done
-          fi
-
-          deps="$(brew deps --include-build "$target")"
-          for dep in gettext gdbm; do
-            if [[ "$FORMULA" != "$dep" && -n "$(brew list --versions "$dep")" ]] &&
-              ! grep -Fxq -- "$dep" <<< "$deps"; then
-              # Unlink pre-installed optional libs not declared by the formula so
-              # configure does not link against them in /usr/local as undeclared dependencies.
-              brew unlink "$dep"
-            fi
-          done
-
-          brew install --build-bottle "$target"
-
-          mkdir "$RUNNER_TEMP/bottles"
-          cd "$RUNNER_TEMP/bottles"
-          brew bottle --json --no-rebuild "$target"
-          shasum -a 256 ./*.sequoia.bottle.tar.gz > SHA256SUMS
-
-      - name: Verify the bottle installs through Homebrew
-        if: steps.source.outputs.build == 'true'
-        shell: bash
-        working-directory: ${{ runner.temp }}/bottles
-        run: |
-          shasum -a 256 -c SHA256SUMS
-          cache="$(brew --cache)"
-          brew uninstall --force --ignore-dependencies "homebrew/core/$FORMULA"
-          rm -rf "$cache/tool-selection"
-          HOMEBREW_DEVELOPER=1 brew install ./*.sequoia.bottle.tar.gz
-          prefix="$(brew --prefix "$FORMULA")"
-          jq -e '.poured_from_bottle and .source.tap == "homebrew/core"' \
-            "$prefix/INSTALL_RECEIPT.json"
-          brew linkage --test "$FORMULA"
-
-          if [[ "$FORMULA" == llvm || "$FORMULA" == llvm@* ]]; then
-            printf 'int main(void) { return 0; }\n' |
-              "$prefix/bin/clang" -x c - -o "$RUNNER_TEMP/llvm-smoke-test"
-            "$RUNNER_TEMP/llvm-smoke-test"
-          fi
-
-      - name: Upload the verified bottle
-        if: steps.source.outputs.build == 'true'
-        uses: actions/upload-artifact@v7
+      - uses: ./.github/actions/build-bottle
         with:
-          name: ${{ steps.source.outputs.artifact }}
-          path: ${{ runner.temp }}/bottles/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 90
-          overwrite: true
+          formula: ${{ matrix.formula }}
+          gh-token: ${{ github.token }}
+          skip-existing: ${{ github.event_name == 'schedule' || inputs.formula == '' || matrix.formula != inputs.formula }}
+
+  wave-1:
+    needs: [select-formulae, wave-0]
+    if: always() && !cancelled() && needs.select-formulae.result == 'success' && needs.select-formulae.outputs.wave_1 != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(needs.select-formulae.outputs.wave_1) }}
+    concurrency:
+      group: sequoia-intel-bottle-${{ matrix.formula }}
+      cancel-in-progress: false
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_AUTOREMOVE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-bottle
+        with:
+          formula: ${{ matrix.formula }}
+          gh-token: ${{ github.token }}
+          skip-existing: ${{ github.event_name == 'schedule' || inputs.formula == '' || matrix.formula != inputs.formula }}
+
+  wave-2:
+    needs: [select-formulae, wave-1]
+    if: always() && !cancelled() && needs.select-formulae.result == 'success' && needs.select-formulae.outputs.wave_2 != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(needs.select-formulae.outputs.wave_2) }}
+    concurrency:
+      group: sequoia-intel-bottle-${{ matrix.formula }}
+      cancel-in-progress: false
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_AUTOREMOVE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-bottle
+        with:
+          formula: ${{ matrix.formula }}
+          gh-token: ${{ github.token }}
+          skip-existing: ${{ github.event_name == 'schedule' || inputs.formula == '' || matrix.formula != inputs.formula }}
+
+  wave-3:
+    needs: [select-formulae, wave-2]
+    if: always() && !cancelled() && needs.select-formulae.result == 'success' && needs.select-formulae.outputs.wave_3 != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(needs.select-formulae.outputs.wave_3) }}
+    concurrency:
+      group: sequoia-intel-bottle-${{ matrix.formula }}
+      cancel-in-progress: false
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_AUTOREMOVE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-bottle
+        with:
+          formula: ${{ matrix.formula }}
+          gh-token: ${{ github.token }}
+          skip-existing: ${{ github.event_name == 'schedule' || inputs.formula == '' || matrix.formula != inputs.formula }}
+
+  wave-4:
+    needs: [select-formulae, wave-3]
+    if: always() && !cancelled() && needs.select-formulae.result == 'success' && needs.select-formulae.outputs.wave_4 != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(needs.select-formulae.outputs.wave_4) }}
+    concurrency:
+      group: sequoia-intel-bottle-${{ matrix.formula }}
+      cancel-in-progress: false
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_AUTOREMOVE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-bottle
+        with:
+          formula: ${{ matrix.formula }}
+          gh-token: ${{ github.token }}
+          skip-existing: ${{ github.event_name == 'schedule' || inputs.formula == '' || matrix.formula != inputs.formula }}
+
+  wave-5:
+    needs: [select-formulae, wave-4]
+    if: always() && !cancelled() && needs.select-formulae.result == 'success' && needs.select-formulae.outputs.wave_5 != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        formula: ${{ fromJSON(needs.select-formulae.outputs.wave_5) }}
+    concurrency:
+      group: sequoia-intel-bottle-${{ matrix.formula }}
+      cancel-in-progress: false
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_AUTOREMOVE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-bottle
+        with:
+          formula: ${{ matrix.formula }}
+          gh-token: ${{ github.token }}
+          skip-existing: ${{ github.event_name == 'schedule' || inputs.formula == '' || matrix.formula != inputs.formula }}
