@@ -109,7 +109,7 @@ prepare_dependencies() {
   ' <<< "$plan")"
   while read -r name version; do
     [[ -n "$name" ]] || continue
-    install_dependency_bottle "$name" "$version" "$ancestors" "$strict"
+    install_dependency_bottle "$name" "$version" "$ancestors" "$strict" </dev/null
   done <<< "$dependencies"
 
   if [[ "$strict" == true ]] &&

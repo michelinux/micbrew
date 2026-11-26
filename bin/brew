@@ -146,7 +146,7 @@ if [[ $# -eq 0 ]]; then
   while IFS= read -r name; do
     if [[ -n "$name" ]] && { { [[ "$mode" == upgrade ]] && bottle_required "$name"; } ||
       jq -e --arg prefix "$name-" 'any(.name | startswith($prefix))' <<< "$catalog" >/dev/null; }; then
-      process_formula "$name" bulk
+      process_formula "$name" bulk </dev/null
     fi
   done <<< "$outdated"
   if [[ "$mode" == upgrade ]]; then
