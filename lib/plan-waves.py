@@ -16,17 +16,38 @@ def validate_formula_name(name: str) -> str:
     return name
 
 
+def resolve_sequoia_formula(formula_obj: dict | None) -> dict:
+    """Overlay Intel Sequoia variation fields over top-level Homebrew API metadata."""
+    if not formula_obj:
+        return {}
+    variation = (formula_obj.get("variations") or {}).get("sequoia")
+    if not isinstance(variation, dict):
+        return formula_obj
+    merged = dict(formula_obj)
+    merged.update(variation)
+    if isinstance(formula_obj.get("urls"), dict) and isinstance(variation.get("urls"), dict):
+        merged_urls = dict(formula_obj["urls"])
+        merged_urls.update(variation["urls"])
+        merged["urls"] = merged_urls
+    if isinstance(formula_obj.get("versions"), dict) and isinstance(variation.get("versions"), dict):
+        merged_versions = dict(formula_obj["versions"])
+        merged_versions.update(variation["versions"])
+        merged["versions"] = merged_versions
+    return merged
+
+
 def bottle_artifact_name(formula_obj: dict) -> str | None:
     """Compute the exact artifact name matching lib/bottle.sh's bottle_identity."""
-    name = formula_obj.get("name")
-    versions = formula_obj.get("versions") or {}
+    resolved = resolve_sequoia_formula(formula_obj)
+    name = resolved.get("name")
+    versions = resolved.get("versions") or {}
     stable = versions.get("stable")
-    urls = formula_obj.get("urls") or {}
+    urls = resolved.get("urls") or {}
     stable_url = urls.get("stable")
     if not name or stable is None or stable_url is None:
         return None
-    revision = formula_obj.get("revision", 0)
-    version_scheme = formula_obj.get("version_scheme", 0)
+    revision = resolved.get("revision") or 0
+    version_scheme = resolved.get("version_scheme") or 0
     source = {
         "version": stable,
         "revision": revision,
@@ -40,10 +61,11 @@ def bottle_artifact_name(formula_obj: dict) -> str | None:
 
 
 def formula_deps(formula_obj: dict | None) -> set[str]:
-    if not formula_obj:
+    resolved = resolve_sequoia_formula(formula_obj)
+    if not resolved:
         return set()
-    deps = set(formula_obj.get("dependencies") or [])
-    deps.update(formula_obj.get("build_dependencies") or [])
+    deps = set(resolved.get("dependencies") or [])
+    deps.update(resolved.get("build_dependencies") or [])
     return deps
 
 

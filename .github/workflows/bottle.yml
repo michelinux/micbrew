@@ -1,4 +1,5 @@
 name: Build an Intel Homebrew bottle
+run-name: Build an Intel Homebrew bottle (${{ inputs.formula || 'configured list' }})
 
 on:
   schedule:
@@ -42,13 +43,13 @@ jobs:
           if curl -fsSL --retry 3 https://formulae.brew.sh/api/formula.json -o "$api_file" &&
             gh api --method GET --paginate --slurp \
               "repos/$GITHUB_REPOSITORY/actions/artifacts" -f per_page=100 |
-              jq -c '[.[].artifacts[] | select(.expired == false and .workflow_run.head_repository_id == .workflow_run.repository_id) | .name] | unique' \
+              jq -c '[.[].artifacts[] | select(.expired == false and .workflow_run.id != null and .workflow_run.head_repository_id == .workflow_run.repository_id) | .name] | unique' \
               > "$artifacts_file"; then
             plan="$(python3 lib/plan-waves.py \
               --formulae-file formulae.json \
               --api-file "$api_file" \
               --artifacts-file "$artifacts_file" \
-              --requested-formula "$REQUESTED_FORMULA" \
+              --requested-formula="$REQUESTED_FORMULA" \
               --skip-existing \
               --max-waves 6)"
             for i in 0 1 2 3 4 5; do
