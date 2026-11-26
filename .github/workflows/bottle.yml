@@ -150,15 +150,17 @@ jobs:
                 rm -f -- "$link"
               fi
             done
-
-            for dep in gettext gdbm; do
-              if [[ -n "$(brew list --versions "$dep")" ]]; then
-                # Unlink pre-installed optional libs so CPython does not link against
-                # them in /usr/local as undeclared runtime dependencies.
-                brew unlink "$dep"
-              fi
-            done
           fi
+
+          deps="$(brew deps --include-build "$target")"
+          for dep in gettext gdbm; do
+            if [[ "$FORMULA" != "$dep" && -n "$(brew list --versions "$dep")" ]] &&
+              ! grep -Fxq -- "$dep" <<< "$deps"; then
+              # Unlink pre-installed optional libs not declared by the formula so
+              # configure does not link against them in /usr/local as undeclared dependencies.
+              brew unlink "$dep"
+            fi
+          done
 
           brew install --build-bottle "$target"
 
